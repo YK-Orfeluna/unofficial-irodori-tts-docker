@@ -9,9 +9,10 @@ RUN pip install --no-cache-dir --break-system-packages uv
 
 WORKDIR /app
 COPY Irodori-TTS/ .
+COPY gradio_app.py .
 
 RUN uv sync --frozen --no-dev --extra cu128
 
 EXPOSE 7860
 
-ENTRYPOINT ["uv", "run", "python", "gradio_app.py", "--server-name", "0.0.0.0", "--server-port", "7860"]
+ENTRYPOINT ["uv", "run", "--no-sync", "python", "gradio_app.py", "--server-name", "0.0.0.0", "--server-port", "7860"]
