@@ -3,8 +3,26 @@ services:
     build: .
     image: irodori-tts:v3
     container_name: Irodori-TTS
+    command: ["gradio_app.py", "--server-name", "0.0.0.0", "--server-port", "7860"]
     ports:
       - "7860:7860"
+    volumes:
+      - ./pretrained_models:/app/pretrained_models
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  irodori-tts-voicedesign:
+    image: irodori-tts:v3
+    container_name: Irodori-TTS-VoiceDesign
+    command: ["gradio_app_voicedesign.py", "--server-name", "0.0.0.0", "--server-port", "7861"]
+    ports:
+      - "7861:7861"
     volumes:
       - ./pretrained_models:/app/pretrained_models
       - ~/.cache/huggingface:/root/.cache/huggingface
