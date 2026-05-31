@@ -1,7 +1,7 @@
 services:
   irodori-tts:
     build: .
-    image: irodori-tts:v2
+    image: irodori-tts:v3
     container_name: Irodori-TTS
     ports:
       - "7860:7860"
