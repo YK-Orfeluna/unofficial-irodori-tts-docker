@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir --break-system-packages uv
 WORKDIR /app
 COPY Irodori-TTS/ .
 
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --extra cu128
 
 EXPOSE 7860
 

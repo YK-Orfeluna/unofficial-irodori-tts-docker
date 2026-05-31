@@ -31,7 +31,7 @@ docker compose up --build
 
 **HuggingFace Hub から自動ダウンロード（デフォルト）**
 
-初回起動時に `Aratako/Irodori-TTS-500M-v2` が `~/.cache/huggingface/` にダウンロードされます。2回目以降はキャッシュを利用するため再ダウンロードは不要です。
+初回起動時に `Aratako/Irodori-TTS-500M-v3` が `~/.cache/huggingface/` にダウンロードされます。2回目以降はキャッシュを利用するため再ダウンロードは不要です。
 
 **ローカルモデルを使う場合**
 
