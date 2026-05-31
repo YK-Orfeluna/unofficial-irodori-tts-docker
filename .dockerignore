@@ -1,0 +1,17 @@
+.git
+Irodori-TTS/.git
+Irodori-TTS/pretrained_models/
+Irodori-TTS/wandb/
+Irodori-TTS/outputs/
+Irodori-TTS/data/
+Irodori-TTS/**/__pycache__/
+Irodori-TTS/**/*.pyc
+Irodori-TTS/**/gradio_outputs/
+Irodori-TTS/**/gradio_outputs_voicedesign/
+Irodori-TTS/.gradio
+Irodori-TTS/.ruff_cache/
+# 訓練用（推論イメージには不要）
+Irodori-TTS/train.py
+Irodori-TTS/prepare_manifest.py
+Irodori-TTS/convert_checkpoint_to_safetensors.py
+Irodori-TTS/configs/

@@ -1,0 +1,7 @@
+pretrained_models/
+outputs/
+data/
+wandb/
+__pycache__/
+*.pyc
+.gradio/

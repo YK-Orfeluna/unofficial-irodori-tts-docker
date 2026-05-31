@@ -1,0 +1,17 @@
+services:
+  irodori-tts:
+    build: .
+    image: irodori-tts:v2
+    container_name: Irodori-TTS
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./pretrained_models:/app/pretrained_models
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
