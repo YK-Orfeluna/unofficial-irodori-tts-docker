@@ -17,6 +17,7 @@ WORKDIR /app
 COPY Irodori-TTS/ .
 COPY gradio_app.py .
 COPY gradio_app_voicedesign.py .
+COPY irodori_tts_api/ ./irodori_tts_api/
 
 # pyproject.toml は cu128 インデックス固定のため、uv sync では PyTorch 一式をスキップし、
 # cu130 wheel から別途投入する。cu130 ビルドは sm_121a SASS を含み GB10 (cc 12.1) を直接サポート。

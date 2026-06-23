@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 
 import gradio as gr
-from huggingface_hub import hf_hub_download
 
 from irodori_tts.gradio_emoji_palette import EMOJI_PALETTE_CSS, build_emoji_palette
 from irodori_tts.inference_runtime import (
@@ -20,6 +19,16 @@ from irodori_tts.inference_runtime import (
     save_wav,
 )
 from irodori_tts.speaker_inversion import is_speaker_inversion_safetensors_path
+from irodori_tts_api.inference_facade import (
+    DEFAULT_CHUNK_SILENCE_MS,
+    DEFAULT_MAX_CHARS_PER_CHUNK,
+    run_split_synthesis,
+)
+from irodori_tts_api.runtime_helpers import (
+    build_runtime_key as _shared_build_runtime_key,
+    resolve_precision_from_env,
+)
+from irodori_tts_api.text_splitter import split_text_for_tts
 
 MAX_GRADIO_CANDIDATES = 32
 GRADIO_AUDIO_COLS_PER_ROW = 8
@@ -164,20 +173,6 @@ def _resolve_speaker_embedding(
     return uploaded_path if uploaded_path is not None else raw_path
 
 
-def _resolve_checkpoint_path(raw_checkpoint: str) -> str:
-    checkpoint = str(raw_checkpoint).strip()
-    if checkpoint == "":
-        raise ValueError("checkpoint is required.")
-
-    suffix = Path(checkpoint).suffix.lower()
-    if suffix in {".pt", ".safetensors"}:
-        return checkpoint
-
-    resolved = hf_hub_download(repo_id=checkpoint, filename="model.safetensors")
-    print(f"[gradio] checkpoint: hf://{checkpoint} -> {resolved}", flush=True)
-    return str(resolved)
-
-
 def _build_runtime_key(
     checkpoint: str,
     model_device: str,
@@ -185,16 +180,14 @@ def _build_runtime_key(
     codec_device: str,
     codec_precision: str,
 ) -> RuntimeKey:
-    checkpoint_path = _resolve_checkpoint_path(checkpoint)
-    return RuntimeKey(
-        checkpoint=checkpoint_path,
-        model_device=str(model_device),
-        codec_repo="Aratako/Semantic-DACVAE-Japanese-32dim",
-        model_precision=str(model_precision),
-        codec_device=str(codec_device),
-        codec_precision=str(codec_precision),
-        compile_model=False,
-        compile_dynamic=False,
+    return _shared_build_runtime_key(
+        checkpoint=checkpoint,
+        model_device=model_device,
+        model_precision=model_precision,
+        codec_device=codec_device,
+        codec_precision=codec_precision,
+        log_prefix="gradio",
+        reject_speaker_inversion=False,
     )
 
 
@@ -258,6 +251,9 @@ def _run_generation(
     speaker_kv_min_t_raw: str,
     speaker_kv_max_layers_raw: str,
     lora_adapter_raw: str,
+    auto_split: bool,
+    max_chars_per_chunk: int,
+    chunk_silence_ms: int,
 ) -> tuple[object, ...]:
     def stdout_log(msg: str) -> None:
         print(msg, flush=True)
@@ -325,23 +321,26 @@ def _run_generation(
     if speaker_embedding is not None:
         stdout_log(f"[gradio] speaker_embedding: {speaker_embedding}")
 
-    result = runtime.synthesize(
-        SamplingRequest(
-            text=str(text),
+    if bool(auto_split) and requested_candidates != 1:
+        raise ValueError("auto_split requires Num Candidates == 1.")
+
+    def build_request(text_value: str, seed_value: int | None) -> SamplingRequest:
+        return SamplingRequest(
+            text=text_value,
             ref_wav=ref_wav,
             ref_latent=None,
             ref_embed=speaker_embedding,
             no_ref=bool(no_ref),
             ref_normalize_db=ref_normalize_db,
             ref_ensure_max=bool(ref_ensure_max),
-            num_candidates=requested_candidates,
+            num_candidates=1 if bool(auto_split) else requested_candidates,
             decode_mode="sequential",
             seconds=manual_seconds,
             duration_scale=float(duration_scale),
             max_ref_seconds=30.0,
             max_text_len=None,
             num_steps=int(num_steps),
-            seed=None if seed is None else int(seed),
+            seed=None if seed_value is None else int(seed_value),
             cfg_guidance_mode=str(cfg_guidance_mode),
             cfg_scale_text=float(cfg_scale_text),
             cfg_scale_speaker=float(cfg_scale_speaker),
@@ -359,9 +358,25 @@ def _run_generation(
             sway_coeff=float(sway_coeff),
             trim_tail=True,
             lora_adapter=lora_adapter,
-        ),
-        log_fn=stdout_log,
-    )
+        )
+
+    if bool(auto_split):
+        chunks = split_text_for_tts(str(text), max_chars=int(max_chars_per_chunk))
+        if not chunks:
+            raise ValueError("text is required.")
+        stdout_log(f"[gradio] auto_split: {len(chunks)} chunks (max={int(max_chars_per_chunk)})")
+        result = run_split_synthesis(
+            chunks=chunks,
+            build_request=build_request,
+            initial_seed=seed,
+            runtime=runtime,
+            log_fn=stdout_log,
+            silence_ms=int(chunk_silence_ms),
+        )
+    else:
+        # auto_split=False では改行をそのまま渡すと合成音が乱れるため空白に置換する
+        sanitized_text = str(text).replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+        result = runtime.synthesize(build_request(sanitized_text, seed), log_fn=stdout_log)
 
     out_dir = Path("gradio_outputs")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -409,7 +424,7 @@ def build_ui() -> gr.Blocks:
     model_precision_choices = _precision_choices_for_device(default_model_device)
     codec_precision_choices = _precision_choices_for_device(default_codec_device)
 
-    with gr.Blocks(title="Irodori-TTS Gradio") as demo:
+    with gr.Blocks(title="Irodori-TTS Gradio", css=EMOJI_PALETTE_CSS) as demo:
         gr.Markdown("# Irodori-TTS Inference (Cached Runtime)")
         gr.Markdown(
             "When settings are unchanged, runtime is reused and only sampling/decoding runs."
@@ -536,6 +551,26 @@ def build_ui() -> gr.Blocks:
                     step=0.1,
                 )
 
+            with gr.Row():
+                auto_split = gr.Checkbox(
+                    label="Auto Split (長文を句点で分割し連結)",
+                    value=False,
+                )
+                max_chars_per_chunk = gr.Slider(
+                    label="Max Chars / Chunk",
+                    minimum=50,
+                    maximum=500,
+                    value=DEFAULT_MAX_CHARS_PER_CHUNK,
+                    step=10,
+                )
+                chunk_silence_ms = gr.Slider(
+                    label="Chunk Silence (ms)",
+                    minimum=0,
+                    maximum=1000,
+                    value=DEFAULT_CHUNK_SILENCE_MS,
+                    step=10,
+                )
+
         with gr.Accordion("Advanced (Optional)", open=False):
             cfg_scale_raw = gr.Textbox(label="CFG Scale Override (optional)", value="")
             with gr.Row():
@@ -612,6 +647,9 @@ def build_ui() -> gr.Blocks:
                 speaker_kv_min_t_raw,
                 speaker_kv_max_layers_raw,
                 lora_adapter_raw,
+                auto_split,
+                max_chars_per_chunk,
+                chunk_silence_ms,
             ],
             outputs=[*out_audios, out_log, out_timing],
         )
@@ -642,21 +680,54 @@ def build_ui() -> gr.Blocks:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Gradio app for Irodori-TTS with cached runtime.")
+    parser = argparse.ArgumentParser(description="Gradio + REST API app for Irodori-TTS (500M reference).")
     parser.add_argument("--server-name", default="127.0.0.1")
     parser.add_argument("--server-port", type=int, default=7860)
-    parser.add_argument("--share", action="store_true")
+    parser.add_argument("--share", action="store_true", help="ignored (kept for CLI compatibility)")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
+    import gradio as gr_mount  # ローカル import: mount_gradio_app は import 時刻に副作用が出る場合があるため
+    import uvicorn
+    from fastapi import FastAPI
+
+    from irodori_tts_api.app import attach_api
+
     demo = build_ui()
     demo.queue(default_concurrency_limit=1)
-    demo.launch(
-        server_name=args.server_name,
-        server_port=args.server_port,
-        share=bool(args.share),
-        debug=bool(args.debug),
-        css=EMOJI_PALETTE_CSS,
+
+    default_model_device = _default_model_device()
+    default_codec_device = _default_codec_device()
+    default_model_precision = resolve_precision_from_env(
+        "IRODORI_MODEL_PRECISION",
+        device=default_model_device,
+        fallback=_precision_choices_for_device(default_model_device)[0],
+        log_prefix="api-ref",
+    )
+    default_codec_precision = resolve_precision_from_env(
+        "IRODORI_CODEC_PRECISION",
+        device=default_codec_device,
+        fallback=_precision_choices_for_device(default_codec_device)[0],
+        log_prefix="api-ref",
+    )
+
+    app = FastAPI(title="Irodori-TTS 500M API", docs_url="/api/docs", openapi_url="/api/openapi.json")
+    attach_api(
+        app,
+        endpoint_kind="ref",
+        default_checkpoint=_default_checkpoint(),
+        default_model_device=default_model_device,
+        default_model_precision=default_model_precision,
+        default_codec_device=default_codec_device,
+        default_codec_precision=default_codec_precision,
+    )
+    app = gr_mount.mount_gradio_app(app, demo, path="/")
+
+    uvicorn.run(
+        app,
+        host=args.server_name,
+        port=args.server_port,
+        log_level="debug" if args.debug else "info",
     )
 
 
