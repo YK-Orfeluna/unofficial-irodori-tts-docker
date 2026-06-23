@@ -3,12 +3,27 @@ services:
     build: .
     image: irodori-tts:v3
     container_name: Irodori-TTS
+    profiles: ["ref"]
+    restart: unless-stopped
     command: ["gradio_app.py", "--server-name", "0.0.0.0", "--server-port", "7860"]
+    environment:
+      # GB10 ユニファイドメモリでの allocator フラグメンテーション/予約挙動を検証するための実験設定
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      # API 起動時にロードするモデル/コーデック量子化レベル (fp32 / bf16)。未設定なら fp32 にフォールバック。
+      # bf16 はおおむね fp32 の半分の VRAM で動作する。CPU 等 bf16 非対応デバイスで指定するとプロセスが起動失敗する。
+      IRODORI_MODEL_PRECISION: "bf16"
+      IRODORI_CODEC_PRECISION: "bf16"
     ports:
       - "7860:7860"
     volumes:
       - ./pretrained_models:/app/pretrained_models
       - ~/.cache/huggingface:/root/.cache/huggingface
+      - ./api_outputs/irodori-tts:/app/api_outputs
+      - ./reference_audio:/app/reference_audio:ro
+    networks:
+      dify_net:
+        aliases:
+          - irodori-tts-500m
     deploy:
       resources:
         reservations:
@@ -16,16 +31,33 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860/api/v1/health', timeout=2).read()\" || exit 1"]
+      interval: 1m
+      timeout: 5s
+      start_period: 15m
 
   irodori-tts-voicedesign:
     image: irodori-tts:v3
     container_name: Irodori-TTS-VoiceDesign
+    profiles: ["voicedesign"]
+    restart: unless-stopped
     command: ["gradio_app_voicedesign.py", "--server-name", "0.0.0.0", "--server-port", "7861"]
+    environment:
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      IRODORI_MODEL_PRECISION: "bf16"
+      IRODORI_CODEC_PRECISION: "bf16"
     ports:
       - "7861:7861"
     volumes:
       - ./pretrained_models:/app/pretrained_models
       - ~/.cache/huggingface:/root/.cache/huggingface
+      - ./api_outputs/irodori-tts-voicedesign:/app/api_outputs
+      - ./reference_audio:/app/reference_audio:ro
+    networks:
+      dify_net:
+        aliases:
+          - irodori-tts-voicedesign
     deploy:
       resources:
         reservations:
@@ -33,3 +65,13 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:7861/api/v1/health', timeout=2).read()\" || exit 1"]
+      interval: 1m
+      timeout: 5s
+      start_period: 15m
+
+networks:
+  dify_net:
+    external: true
+    name: dify_default
