@@ -5,3 +5,7 @@ wandb/
 __pycache__/
 *.pyc
 .gradio/
+
+# reference_audio: ディレクトリ自体は .gitkeep で追跡、中の音声ファイルは追跡しない
+reference_audio/*
+!reference_audio/.gitkeep
