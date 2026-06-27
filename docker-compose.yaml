@@ -1,3 +1,8 @@
+# 起動方法 (ref と voicedesign は排他: 同時起動しない / VRAM 二重ロード回避):
+#   docker compose up -d                              -> irodori-tts (ref) のみ
+#     └ 同梱の .env で COMPOSE_PROFILES=ref が既定
+#   COMPOSE_PROFILES=voicedesign docker compose up -d -> irodori-tts-voicedesign のみ
+
 services:
   irodori-tts:
     build: .
