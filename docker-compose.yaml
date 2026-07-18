@@ -18,6 +18,10 @@ services:
       # bf16 はおおむね fp32 の半分の VRAM で動作する。CPU 等 bf16 非対応デバイスで指定するとプロセスが起動失敗する。
       IRODORI_MODEL_PRECISION: "bf16"
       IRODORI_CODEC_PRECISION: "bf16"
+      # オンプレ運用 (NW 遮断) 前提。HF Hub への問い合わせを完全に無効化し
+      # ローカルキャッシュのみで tokenizer/config/model を解決する。
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
     ports:
       - "7860:7860"
     volumes:
@@ -52,6 +56,8 @@ services:
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
       IRODORI_MODEL_PRECISION: "bf16"
       IRODORI_CODEC_PRECISION: "bf16"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
     ports:
       - "7861:7861"
     volumes:
