@@ -1,4 +1,6 @@
 pretrained_models/
+hf_cache/
+api_outputs/
 outputs/
 data/
 wandb/

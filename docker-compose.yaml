@@ -2,6 +2,11 @@
 #   docker compose up -d                              -> irodori-tts (ref) のみ
 #     └ 同梱の .env で COMPOSE_PROFILES=ref が既定
 #   COMPOSE_PROFILES=voicedesign docker compose up -d -> irodori-tts-voicedesign のみ
+#
+# モデルは hf_cache/ に保持され、初回起動時に自動でダウンロードされる (事前準備不要)。
+# HF Hub の offline/online は docker-entrypoint.sh がキャッシュの状態から自動判定する:
+# キャッシュが揃っていれば offline (高速)、不足していれば online で取得する。
+# HF_HUB_OFFLINE を明示指定した場合のみ自動判定を行わずその値に従う。
 
 services:
   irodori-tts:
@@ -18,15 +23,16 @@ services:
       # bf16 はおおむね fp32 の半分の VRAM で動作する。CPU 等 bf16 非対応デバイスで指定するとプロセスが起動失敗する。
       IRODORI_MODEL_PRECISION: "bf16"
       IRODORI_CODEC_PRECISION: "bf16"
-      # オンプレ運用 (NW 遮断) 前提。HF Hub への問い合わせを完全に無効化し
-      # ローカルキャッシュのみで tokenizer/config/model を解決する。
-      HF_HUB_OFFLINE: "1"
-      TRANSFORMERS_OFFLINE: "1"
+      # 未指定 (既定) で entrypoint による自動判定。1 / 0 を明示すると固定できる。
+      HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-}"
+      TRANSFORMERS_OFFLINE: "${TRANSFORMERS_OFFLINE:-}"
     ports:
       - "7860:7860"
     volumes:
       - ./pretrained_models:/app/pretrained_models
-      - ~/.cache/huggingface:/root/.cache/huggingface
+      # 常時オフライン稼働のため、再取得不可なモデルを ~/.cache (XDG 上は破棄可能領域)
+      # ではなくプロジェクト配下の永続ディレクトリに置く。
+      - ./hf_cache:/root/.cache/huggingface
       - ./api_outputs/irodori-tts:/app/api_outputs
       - ./reference_audio:/app/reference_audio:ro
     networks:
@@ -56,13 +62,13 @@ services:
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
       IRODORI_MODEL_PRECISION: "bf16"
       IRODORI_CODEC_PRECISION: "bf16"
-      HF_HUB_OFFLINE: "1"
-      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-}"
+      TRANSFORMERS_OFFLINE: "${TRANSFORMERS_OFFLINE:-}"
     ports:
       - "7861:7861"
     volumes:
       - ./pretrained_models:/app/pretrained_models
-      - ~/.cache/huggingface:/root/.cache/huggingface
+      - ./hf_cache:/root/.cache/huggingface
       - ./api_outputs/irodori-tts-voicedesign:/app/api_outputs
       - ./reference_audio:/app/reference_audio:ro
     networks:

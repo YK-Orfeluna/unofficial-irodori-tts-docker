@@ -36,5 +36,9 @@ EXPOSE 7861
 # cu130 wheel には sm_121a cubin が同梱されており、実行自体は問題なく動作する。
 ENV PYTHONWARNINGS="ignore::UserWarning:torch.cuda"
 
-ENTRYPOINT ["uv", "run", "--no-sync", "python"]
+# HF キャッシュの状態に応じて offline/online を自動で切り替える。詳細はスクリプト内コメント参照。
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["gradio_app.py", "--server-name", "0.0.0.0", "--server-port", "7860"]

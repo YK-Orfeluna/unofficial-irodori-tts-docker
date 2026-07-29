@@ -44,7 +44,20 @@ UI 用エンドポイント: `/` (Gradio)、API ドキュメント: `/api/docs`�
 
 ## モデルキャッシュ
 
-初回起動時に Gradio UI / API 経由で選択した checkpoint が `~/.cache/huggingface/` にダウンロードされ、コンテナにマウントされます。2 回目以降はキャッシュを利用。
+初回起動時に checkpoint が `hf_cache/` にダウンロードされ、コンテナの `/root/.cache/huggingface` にマウントされます。2 回目以降はキャッシュを利用。事前のモデル取得作業は不要です。
+
+`~/.cache/` ではなくプロジェクト配下に置いているのは、XDG 上 `~/.cache` は「いつ削除しても構わないデータ」の領域であり、NW 遮断環境では再取得できないモデルの置き場所として不適切なためです。
+
+### offline / online の自動判定
+
+HF Hub への問い合わせは `docker-entrypoint.sh` がキャッシュの状態から自動で切り替えます。
+
+- キャッシュが揃っている場合は `HF_HUB_OFFLINE=1` で起動します。NW 遮断環境ではこれが無いと `resolve_checkpoint_path()` が合成リクエスト毎に HF Hub へのリトライを繰り返し、1 件あたり実測 +23 秒のオーバーヘッドになります (実推論自体は 1 秒未満)。
+- キャッシュ不足で起動に失敗した場合のみ、1 度だけ `HF_HUB_OFFLINE=0` で起動し直してモデルを取得します。
+
+`HF_HUB_OFFLINE` / `TRANSFORMERS_OFFLINE` を明示指定した場合は自動判定を行わず、その値に従います。
+
+なお `docker compose up -d` で起動する ref プロファイルでは、既定 checkpoint 以外に codec・tokenizer・音声透かしのモデル (計 4 リポジトリ、約 2.4GB) が起動時に取得されます。Gradio UI から既定以外の checkpoint に切り替える場合、そのモデルは未キャッシュのため NW 遮断環境では利用できません。
 
 ## 参照音声 (`reference_audio/`)
 
