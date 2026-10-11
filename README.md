@@ -53,12 +53,14 @@ UIのCheckpointで通常モデル・量子化モデル・ローカルcheckpoint�
 
 以下の通常モデルは、日本語のVoice Cloning・captionによるVoiceDesign・両者の併用・絵文字によるスタイル制御に対応します。参照音声は単一または複数、合計最大120秒。音声長の自動予測と48kHz出力も共通です。
 
-| モデル（公式モデルカード） | 主な違い | ステップ既定 | モデルのライセンス表記 |
-|---|---|---|---|
-| [v4-Small](https://huggingface.co/Aratako/Irodori-TTS-v4-Small) | 約766Mパラメータ。ModernBERT-jaをテキスト・caption共通エンコーダに採用したv4の基本モデル | RF 40 | MIT |
-| [v4.1-Small](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small) | v4-Smallの音声長予測器だけを置換・再学習。長さの過大推定に起因する生成エラーを減らす更新。RF-DiTと各条件エンコーダは同じ | RF 40 | MIT |
-| [v4.1-Small-MF](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-MF) | v4.1-SmallをMeanFlowで蒸留した少ステップ生成版。条件エンコーダ・音声長予測器を固定し、DiTを学習。量子化とは別の変更 | MeanFlow 4 | MIT |
-| [v4-Large](https://huggingface.co/Aratako/Irodori-TTS-v4-Large) | 約3.29Bパラメータ。DiTと参照エンコーダを拡大し、共通エンコーダをT5Gemma 2へ変更。音声長予測器は本体の学習後に別途学習 | RF 40 | Gemma Terms of Use |
+| モデル（公式モデルカード） | 主な違い | ステップ既定 | 重み用VRAM概算：FP32 | 重み用VRAM概算：BF16 | モデルのライセンス表記 |
+|---|---|---|---|---|---|
+| [v4-Small](https://huggingface.co/Aratako/Irodori-TTS-v4-Small) | 約766Mパラメータ。ModernBERT-jaをテキスト・caption共通エンコーダに採用したv4の基本モデル | RF 40 | 2.85 GiB | 1.43 GiB | MIT |
+| [v4.1-Small](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small) | 約766Mパラメータ。v4-Smallの音声長予測器だけを置換・再学習。長さの過大推定に起因する生成エラーを減らす更新。RF-DiTと各条件エンコーダは同じ | RF 40 | 2.85 GiB | 1.43 GiB | MIT |
+| [v4.1-Small-MF](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-MF) | 約773Mパラメータ。v4.1-SmallをMeanFlowで蒸留した少ステップ生成版。条件エンコーダ・音声長予測器を固定し、DiTを学習。量子化とは別の変更 | MeanFlow 4 | 2.88 GiB | 1.44 GiB | MIT |
+| [v4-Large](https://huggingface.co/Aratako/Irodori-TTS-v4-Large) | 約3.29Bパラメータ。DiTと参照エンコーダを拡大し、共通エンコーダをT5Gemma 2へ変更。音声長予測器は本体の学習後に別途学習 | RF 40 | 12.25 GiB | 6.12 GiB | Gemma Terms of Use |
+
+重み用VRAMは、各公式リポジトリのsafetensorsパラメータ集計値に、FP32は4バイト、BF16は2バイトを掛けた概算です（1 GiB = 2³⁰バイト、2026-10-11確認）。**推論全体のVRAM消費量やピークの実測値ではありません。** 中間値、Attentionの計算用メモリ、CUDAの管理領域などが別途必要で、入力テキスト・参照音声・生成音声が長いほど増える場合があります。コーデックをGPUで動かす場合は、その重みと計算用メモリも必要です。本環境の既定ではコーデックをCPUで動かします。MFはステップ数を減らしますが、重みのVRAMは通常Smallとほぼ同じです。
 
 ステップ既定はUIのNum Stepsを空欄、APIのnum_stepsを未指定にした場合です。RFはRectified Flow、MFはMeanFlowを指します。
 
@@ -88,15 +90,17 @@ Aratako/Irodori-TTS-v4.1-Small-Quantized/float8-weight-only
 Aratako/Irodori-TTS-v4.1-Small-Quantized/float8-dynamic
 ```
 
-| 量子化形式 | 公式版の重み・中間値 | GPU要件・位置づけ |
-|---|---|---|
-| INT8 weight-only | INT8重み / BF16計算（W8A16） | NVIDIA CUDA。公式の汎用INT8推奨形式 |
-| INT8 dynamic | INT8重み / 対応Linear層の中間値も動的INT8（W8A8） | NVIDIA CUDA。実行時にも量子化するため、速度は環境に依存 |
-| INT4 weight-only | INT4重み / BF16計算（W4A16、group size 128） | NVIDIA CC 8.0以上。公開variant中で最小のcheckpoint。RTX 2080では使用不可 |
-| FP8 weight-only | FP8重み / BF16中間値 | NVIDIA CC 8.9以上。RTX 2080では使用不可 |
-| FP8 dynamic | FP8重み / 対応Linear層の中間値も動的FP8 | NVIDIA CC 8.9以上。RTX 2080では使用不可 |
+| 量子化形式 | 公式版の重み・中間値 | 重み容量の参考値：Small（v4 / v4.1） | 重み容量の参考値：Large | GPU要件・位置づけ |
+|---|---|---|---|---|
+| INT8 weight-only | INT8重み / BF16計算（W8A16） | 0.85 GiB（872 MiB） | 3.58 GiB（3,662 MiB） | NVIDIA CUDA。公式の汎用INT8推奨形式 |
+| INT8 dynamic | INT8重み / 対応Linear層の中間値も動的INT8（W8A8） | 0.85 GiB（872 MiB） | 3.58 GiB（3,662 MiB） | NVIDIA CUDA。実行時にも量子化するため、速度は環境に依存 |
+| INT4 weight-only | INT4重み / BF16計算（W4A16、group size 128） | 0.79 GiB（813 MiB） | 2.75 GiB（2,818 MiB） | NVIDIA CC 8.0以上。公開variant中で最小のcheckpoint。RTX 2080では使用不可 |
+| FP8 weight-only | FP8重み / BF16中間値 | 0.85 GiB（873 MiB） | 3.58 GiB（3,665 MiB） | NVIDIA CC 8.9以上。RTX 2080では使用不可 |
+| FP8 dynamic | FP8重み / 対応Linear層の中間値も動的FP8 | 0.88 GiB（906 MiB） | 3.57 GiB（3,659 MiB） | NVIDIA CC 8.9以上。RTX 2080では使用不可 |
 
-不対応のINT4/FP8を選んだ場合は理由を表示し、APIは400を返します。選択肢への掲載はすべてのGPUでの動作保証ではありません。Largeの利用もVRAM容量に依存します。
+量子化表の容量は、上記の公式モデルカードに掲載されたcheckpointサイズをGiB換算した参考値です。保存形式や量子化メタデータも含むため、GPU上の重み容量と一致するとは限らず、推論全体のVRAM実測値でもありません。量子化されない層が残るため、全パラメータに単純に1バイト（INT8/FP8）や0.5バイト（INT4）を掛ける計算では過小評価します。本環境のFP32実行では、公式BF16構成より非量子化層の重み・中間値の容量が増えます。
+
+不対応のINT4/FP8を選んだ場合は理由を表示し、APIは400を返します。選択肢への掲載はすべてのGPUでの動作保証ではありません。通常LargeをFP32でGPUに載せるには重みだけで約12.25 GiB必要なため、RTX 2080の8GBには収まりません。BF16の概算値はBF16対応GPU向けです。
 
 上記のBF16は公式モデルカードの構成です。本環境のRTX 2080では、v4.1-SmallのINT8 weight-only / dynamicをFP32で実行し、音声生成と通常版へのモデル切替を確認済みです。このFP32実行は本環境での実験扱いです。検証時のINT8 dynamicは通常版より合成に時間がかかりました。Largeの音声生成は本環境では未検証です。
 
