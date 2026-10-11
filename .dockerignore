@@ -10,6 +10,12 @@ Irodori-TTS/**/gradio_outputs/
 Irodori-TTS/**/gradio_outputs_voicedesign/
 Irodori-TTS/.gradio
 Irodori-TTS/.ruff_cache/
+pretrained_models/
+api_outputs/
+reference_audio/
+gradio_outputs/
+__pycache__/
+.pytest_cache/
 # 訓練用（推論イメージには不要）
 Irodori-TTS/train.py
 Irodori-TTS/prepare_manifest.py

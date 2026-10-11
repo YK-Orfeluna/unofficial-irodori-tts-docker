@@ -2,14 +2,72 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from pathlib import Path
 
-from huggingface_hub import hf_hub_download
+import torch
+from safetensors import safe_open
 
-from irodori_tts.inference_runtime import RuntimeKey, list_available_runtime_precisions
+from irodori_tts.inference_runtime import (
+    RuntimeKey,
+    clear_cached_runtime,
+    download_hf_checkpoint,
+    get_cached_runtime,
+    list_available_runtime_precisions,
+)
+from irodori_tts.quantization import normalize_quantization_type, parse_quantization_metadata
 from irodori_tts.speaker_inversion import is_speaker_inversion_safetensors_path
 
 CODEC_REPO = "Aratako/Semantic-DACVAE-Japanese-32dim"
+DEFAULT_CHECKPOINT = "Aratako/Irodori-TTS-v4.1-Small"
+
+# モデル切替で旧モデルと新モデルが8GB VRAMを同時に占有することを防ぐ。
+RUNTIME_LOCK = threading.RLock()
+_runtime_key: RuntimeKey | None = None
+
+
+def load_runtime(key: RuntimeKey):
+    global _runtime_key
+    with RUNTIME_LOCK:
+        if key != _runtime_key:
+            clear_cached_runtime()
+            _runtime_key = None
+        try:
+            runtime, reloaded = get_cached_runtime(key)
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            raise
+        _runtime_key = key
+        return runtime, reloaded
+
+
+def unload_runtime() -> None:
+    global _runtime_key
+    with RUNTIME_LOCK:
+        clear_cached_runtime()
+        _runtime_key = None
+
+
+def runtime_precision_choices(device: str) -> list[str]:
+    choices = list_available_runtime_precisions(device)
+    if torch.device(device).type == "cuda" and torch.cuda.get_device_capability(device) < (8, 0):
+        return [value for value in choices if value != "bf16"]
+    return choices
+
+
+def _validate_quantization(quantization_type: str, device: str) -> None:
+    required = {
+        "int4_weight_only": (8, 0),
+        "float8_weight_only": (8, 9),
+        "float8_dynamic_activation_float8_weight": (8, 9),
+    }.get(quantization_type)
+    if required is None:
+        return
+    if torch.device(device).type != "cuda" or torch.cuda.get_device_capability(device) < required:
+        raise ValueError(
+            f"{quantization_type} requires an NVIDIA GPU with compute capability "
+            f"{required[0]}.{required[1]} or newer."
+        )
 
 
 def resolve_precision_from_env(
@@ -33,7 +91,7 @@ def resolve_precision_from_env(
         )
         return fallback
     value = raw.strip()
-    allowed = list_available_runtime_precisions(device)
+    allowed = runtime_precision_choices(device)
     if value not in allowed:
         print(
             f"[{log_prefix}] invalid {env_var_name}={value!r} for device={device!r}. "
@@ -66,7 +124,7 @@ def resolve_checkpoint_path(
     if suffix in {".pt", ".safetensors"}:
         return checkpoint
 
-    resolved = hf_hub_download(repo_id=checkpoint, filename="model.safetensors")
+    resolved = download_hf_checkpoint(checkpoint)
     print(f"[{log_prefix}] checkpoint: hf://{checkpoint} -> {resolved}", flush=True)
     return str(resolved)
 
@@ -81,11 +139,22 @@ def build_runtime_key(
     log_prefix: str,
     reject_speaker_inversion: bool = False,
 ) -> RuntimeKey:
+    if model_precision not in runtime_precision_choices(model_device):
+        raise ValueError(f"Unsupported model precision {model_precision!r} on {model_device}.")
+    if codec_precision not in runtime_precision_choices(codec_device):
+        raise ValueError(f"Unsupported codec precision {codec_precision!r} on {codec_device}.")
+    if "-Quantized/" in checkpoint:
+        _validate_quantization(normalize_quantization_type(checkpoint.rsplit("/", 1)[-1]), model_device)
     checkpoint_path = resolve_checkpoint_path(
         checkpoint,
         log_prefix=log_prefix,
         reject_speaker_inversion=reject_speaker_inversion,
     )
+    if Path(checkpoint_path).suffix.lower() == ".safetensors":
+        with safe_open(checkpoint_path, framework="pt", device="cpu") as handle:
+            quantization = parse_quantization_metadata(handle.metadata() or {})
+        if quantization is not None:
+            _validate_quantization(quantization["quantization_type"], model_device)
     return RuntimeKey(
         checkpoint=checkpoint_path,
         model_device=str(model_device),

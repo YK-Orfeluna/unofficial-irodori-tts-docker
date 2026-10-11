@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -13,16 +12,11 @@ import torch
 from irodori_tts.inference_runtime import (
     SamplingRequest,
     SamplingResult,
-    get_cached_runtime,
     save_wav,
 )
 
-from .runtime_helpers import build_runtime_key
+from .runtime_helpers import RUNTIME_LOCK, build_runtime_key, load_runtime
 from .text_splitter import split_text_for_tts
-
-# シリアル化はモデル単一GPU・既存Gradio queue(concurrency_limit=1)に揃える。
-# threading.Lock を使うことで Gradio (同期ハンドラ)・FastAPI (sync または run_in_threadpool 経由) どちらからでも同じ排他を共有できる。
-_SYNTH_LOCK = threading.Lock()
 
 _OUTPUT_DIR_ENV = "IRODORI_API_OUTPUT_DIR"
 _DEFAULT_OUTPUT_DIR = Path("/app/api_outputs")
@@ -60,31 +54,12 @@ DEFAULT_CHUNK_SILENCE_MS = 150
 
 
 @dataclass
-class RefSynthesisParams:
-    text: str
-    ref_wav: str  # ローカルファイルパス(API ハンドラが multipart を一時保存したパス)
-    num_steps: int = 40
-    num_candidates: int = 1
-    seed: int | None = None
-    cfg_scale_text: float = 3.0
-    cfg_scale_speaker: float = 5.0
-    duration_scale: float = 1.0
-    checkpoint: str | None = None
-    model_device: str | None = None
-    model_precision: str | None = None
-    codec_device: str | None = None
-    codec_precision: str | None = None
-    auto_split: bool = False
-    max_chars_per_chunk: int = DEFAULT_MAX_CHARS_PER_CHUNK
-    chunk_silence_ms: int = DEFAULT_CHUNK_SILENCE_MS
-
-
-@dataclass
-class VoiceDesignSynthesisParams:
+class SynthesisParams:
     text: str
     caption: str = ""
     ref_wav: str | None = None
-    num_steps: int = 40
+    ref_wavs: list[str] | None = None
+    num_steps: int | None = None
     num_candidates: int = 1
     seed: int | None = None
     cfg_scale_text: float = 3.0
@@ -215,114 +190,15 @@ def _save_candidates(
     return results
 
 
-def synthesize_ref(
-    params: RefSynthesisParams,
+def synthesize(
+    params: SynthesisParams,
     *,
     default_checkpoint: str,
     default_model_device: str,
     default_model_precision: str,
     default_codec_device: str,
     default_codec_precision: str,
-    log_prefix: str = "api-ref",
-) -> SynthesisOutput:
-    _validate_common(params.text, params.num_candidates)
-    if not params.ref_wav:
-        raise ValueError("ref_wav is required for the reference-audio endpoint.")
-    _validate_split_params(
-        auto_split=params.auto_split,
-        num_candidates=params.num_candidates,
-        max_chars=params.max_chars_per_chunk,
-        silence_ms=params.chunk_silence_ms,
-    )
-
-    runtime_key = build_runtime_key(
-        checkpoint=params.checkpoint or default_checkpoint,
-        model_device=params.model_device or default_model_device,
-        model_precision=params.model_precision or default_model_precision,
-        codec_device=params.codec_device or default_codec_device,
-        codec_precision=params.codec_precision or default_codec_precision,
-        log_prefix=log_prefix,
-        reject_speaker_inversion=False,
-    )
-
-    log_fn = lambda msg: print(msg, flush=True)  # noqa: E731
-
-    def build_request(text: str, seed: int | None) -> SamplingRequest:
-        return SamplingRequest(
-            text=text,
-            ref_wav=params.ref_wav,
-            ref_latent=None,
-            ref_embed=None,
-            no_ref=False,
-            ref_normalize_db=-16.0,
-            ref_ensure_max=True,
-            num_candidates=1 if params.auto_split else int(params.num_candidates),
-            decode_mode="sequential",
-            seconds=None,
-            duration_scale=float(params.duration_scale),
-            max_ref_seconds=30.0,
-            max_text_len=None,
-            num_steps=int(params.num_steps),
-            seed=None if seed is None else int(seed),
-            cfg_guidance_mode="independent",
-            cfg_scale_text=float(params.cfg_scale_text),
-            cfg_scale_speaker=float(params.cfg_scale_speaker),
-            cfg_scale=None,
-            cfg_min_t=0.5,
-            cfg_max_t=1.0,
-            truncation_factor=None,
-            rescale_k=None,
-            rescale_sigma=None,
-            context_kv_cache=True,
-            speaker_kv_scale=None,
-            speaker_kv_min_t=None,
-            speaker_kv_max_layers=None,
-            t_schedule_mode="linear",
-            sway_coeff=-1.0,
-            trim_tail=True,
-            lora_adapter=None,
-        )
-
-    with _SYNTH_LOCK:
-        runtime, _ = get_cached_runtime(runtime_key)
-        if params.auto_split:
-            chunks = split_text_for_tts(params.text, max_chars=int(params.max_chars_per_chunk))
-            if not chunks:
-                raise ValueError("text is required.")
-            result = run_split_synthesis(
-                chunks=chunks,
-                build_request=build_request,
-                initial_seed=params.seed,
-                runtime=runtime,
-                log_fn=log_fn,
-                silence_ms=int(params.chunk_silence_ms),
-            )
-        else:
-            # auto_split=False では改行をそのまま渡すと合成音が乱れるため空白に置換する
-            sanitized_text = str(params.text).replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
-            result = runtime.synthesize(build_request(sanitized_text, params.seed), log_fn=log_fn)
-
-    candidates = _save_candidates(result.audios, result.sample_rate, _generate_stem())
-    return SynthesisOutput(
-        service="irodori-tts-500m",
-        sample_rate=result.sample_rate,
-        used_seed=result.used_seed,
-        candidates=candidates,
-        stage_timings=list(result.stage_timings),
-        total_to_decode=result.total_to_decode,
-        messages=list(result.messages),
-    )
-
-
-def synthesize_voicedesign(
-    params: VoiceDesignSynthesisParams,
-    *,
-    default_checkpoint: str,
-    default_model_device: str,
-    default_model_precision: str,
-    default_codec_device: str,
-    default_codec_precision: str,
-    log_prefix: str = "api-voicedesign",
+    log_prefix: str = "api",
 ) -> SynthesisOutput:
     _validate_common(params.text, params.num_candidates)
     _validate_split_params(
@@ -331,6 +207,10 @@ def synthesize_voicedesign(
         max_chars=params.max_chars_per_chunk,
         silence_ms=params.chunk_silence_ms,
     )
+    if params.ref_wav and params.ref_wavs:
+        raise ValueError("ref_wav_path and ref_wav_paths are mutually exclusive.")
+    if params.num_steps is not None and params.num_steps < 1:
+        raise ValueError("num_steps must be >= 1.")
 
     runtime_key = build_runtime_key(
         checkpoint=params.checkpoint or default_checkpoint,
@@ -346,23 +226,20 @@ def synthesize_voicedesign(
     ref_wav_path = params.ref_wav if (params.ref_wav and str(params.ref_wav).strip()) else None
     log_fn = lambda msg: print(msg, flush=True)  # noqa: E731
 
-    with _SYNTH_LOCK:
-        runtime, _ = get_cached_runtime(runtime_key)
-        if not runtime.model_cfg.use_caption_condition:
-            raise ValueError(
-                "Loaded checkpoint does not enable caption conditioning. Use the 500M reference endpoint."
-            )
+    with RUNTIME_LOCK:
+        runtime, _ = load_runtime(runtime_key)
+        if caption_value and not runtime.model_cfg.use_caption_condition:
+            raise ValueError("Loaded checkpoint does not enable caption conditioning.")
 
-        effective_no_ref = (
-            ref_wav_path is None or not runtime.model_cfg.use_speaker_condition_resolved
-        )
-        ref_wav_for_request = None if effective_no_ref else ref_wav_path
+        ref_wav_paths = params.ref_wavs or ([ref_wav_path] if ref_wav_path else [])
+        effective_no_ref = not ref_wav_paths or not runtime.model_cfg.use_speaker_condition_resolved
+        ref_wav_paths = None if effective_no_ref else ref_wav_paths
 
         def build_request(text: str, seed: int | None) -> SamplingRequest:
             return SamplingRequest(
                 text=text,
                 caption=caption_value or None,
-                ref_wav=ref_wav_for_request,
+                ref_wavs=ref_wav_paths,
                 ref_latent=None,
                 no_ref=effective_no_ref,
                 ref_normalize_db=-16.0,
@@ -371,10 +248,10 @@ def synthesize_voicedesign(
                 decode_mode="sequential",
                 seconds=None,
                 duration_scale=float(params.duration_scale),
-                max_ref_seconds=30.0,
+                max_ref_seconds=None,
                 max_text_len=None,
                 max_caption_len=None,
-                num_steps=int(params.num_steps),
+                num_steps=params.num_steps,
                 seed=None if seed is None else int(seed),
                 cfg_guidance_mode="independent",
                 cfg_scale_text=float(params.cfg_scale_text),
@@ -415,7 +292,7 @@ def synthesize_voicedesign(
 
     candidates = _save_candidates(result.audios, result.sample_rate, _generate_stem())
     return SynthesisOutput(
-        service="irodori-tts-voicedesign",
+        service="irodori-tts",
         sample_rate=result.sample_rate,
         used_seed=result.used_seed,
         candidates=candidates,

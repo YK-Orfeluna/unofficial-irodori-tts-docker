@@ -1,103 +1,110 @@
 # unofficial-irodori-tts-docker
 
-[Irodori-TTS](https://github.com/Aratako/Irodori-TTS) v3 を Docker で動かすための非公式ラッパー。NVIDIA GB10 (Blackwell, cc 12.1) を含む aarch64 ホストで動作するよう、CUDA 13.0 + cu130 PyTorch wheel ベースに構成。
+[Irodori-TTS](https://github.com/Aratako/Irodori-TTS) v4/v4.1 をDockerで動かす非公式ラッパーです。既定モデルは `Aratako/Irodori-TTS-v4.1-Small`。参照音声によるVoice CloningとcaptionによるVoiceDesignを、1つのGradio UI / REST APIに統合しています。
 
-> **免責事項**
-> このリポジトリは [Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS) の非公式ラッパーです。元リポジトリの作者とは無関係で、公式サポートは提供しません。
-
-## 構成
-
-- Irodori-TTS v3 を Git submodule (`Irodori-TTS/`) として管理
-- Gradio UI 2 種 (Reference Audio / VoiceDesign) を Docker Compose profiles で切替
-- 同じプロセスに FastAPI ベースの REST API (`irodori_tts_api/`) を mount。Gradio UI と同一 port で `/api/v1/*` を公開
-- 外部ネットワーク `dify_default` (compose 上の alias は `dify_net`) に `irodori-tts-500m` / `irodori-tts-voicedesign` の名前で参加。Dify など同ネット上のサービスから上記ホスト名で参照可能
-- 全 service に `/api/v1/health` の healthcheck 付き(初回起動を待つため `start_period: 15m`)
-
-## 前提条件
-
-- Docker / Docker Compose v2
-- NVIDIA GPU + [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
-- 推奨: NVIDIA GB10 (DGX Spark) など sm_121a (cu130) で動く GPU。他 GPU でも cu130 wheel が対応していれば動作可
-- 外部ネットワーク `dify_default` が事前作成済(Dify の compose 起動済み等)
+元リポジトリの作者とは無関係で、公式サポートは提供しません。
 
 ## セットアップ
+
+Docker / Docker Compose v2、NVIDIA GPU、nvidia-container-toolkit、外部ネットワーク `dify_default` が必要です。CUDA 12.8と上流のcu128依存構成を使用します。
 
 ```bash
 git clone --recurse-submodules https://github.com/YK-Orfeluna/unofficial-irodori-tts-docker.git
 cd unofficial-irodori-tts-docker
-
-# 500M Reference Audio (port 7860)
-docker compose --profile ref up --build -d
-
-# VoiceDesign (port 7861)
-docker compose --profile voicedesign up --build -d
+docker compose up --build -d
 ```
 
-両方同時に起動するなら `--profile ref --profile voicedesign` を併用。
+- UI: `http://localhost:7860/`
+- APIドキュメント: `http://localhost:7860/api/docs`
+- health: `http://localhost:7860/api/v1/health`
+- Difyネットワーク内: `irodori-tts-500m:7860` / `irodori-tts-voicedesign:7860`
 
-| profile | UI / API URL | 内部 service 名 | 想定 checkpoint |
+Compose profilesは不要です。旧VoiceDesignの7861は廃止したため、クライアントの接続先を7860へ変更してください。旧DNS名2つは維持します。レスポンスの `service` 値は `irodori-tts` へ統一しています。
+
+## モデル・精度・量子化
+
+UIのCheckpointで通常モデル・量子化モデル・ローカルcheckpointを選べます。任意のモデルIDやローカルパスも入力できます。APIでは既存の `checkpoint` フィールドを使います。
+
+既定のv4.1-Smallのほか、v4-Small、v4.1-Small-MF、v4-Large、v2/v3のbase・VoiceDesign、および公式Small/Large量子化モデルを候補に含めています。ローカルに旧checkpointが残っていても、起動時はv4.1-Smallを選択します。モデル変更時は旧モデルを先に解放します。
+
+### v3からv4への変更点
+
+[公式v3 README](https://github.com/Aratako/Irodori-TTS/blob/v3/README.md)と[公式v4/v4.1 README](https://github.com/Aratako/Irodori-TTS/blob/main/README.md)の記載を比較しています（2026-10-11確認）。v4の基本構成と、その後のv4.1・MeanFlow・量子化への拡張を含みます。
+
+| 項目 | v3 READMEの記載 | v4/v4.1 READMEでの変更 |
+|---|---|---|
+| モデル構成 | 500Mのbaseと600MのVoiceDesignが別checkpoint。VoiceDesignはtext・参照音声・captionの3条件に対応 | v4-Small系の1つのcheckpointにbaseとVoiceDesignの機能を統合 |
+| テキスト・captionのエンコーダ | テキストは事前学習LLM由来の埋め込みとTransformer層。captionには別エンコーダを使用 | fine-tuneしたModernBERTを両者で共有し、別々のプロジェクタで各条件へ変換 |
+| 参照音声 | 単一の参照音声・latent・Speaker Inversion embeddingを使う例を記載。複数参照や長時間参照の説明はない | 複数clipを指定順に連結し、v4-Smallでは合計最大120秒。各clipを個別にエンコードしてからlatentを連結 |
+| 少ステップ生成 | RFのEulerステップ削減とSway Samplingを紹介 | それらに加え、v4.1-Smallを蒸留したMeanFlow版を紹介。既定4ステップで、条件エンコーダ・音声長予測器は固定してDiTを学習 |
+| 量子化 | 量子化checkpointの説明はない | torchaoによるINT8・INT4・FP8版と量子化スクリプトを紹介。対象層やGPU要件は下記の量子化節を参照 |
+| checkpointの配布・移動 | ローカルcheckpointまたはHFモデルIDを指定する推論を紹介 | 事前学習テキストエンコーダを持つcheckpointの変換ではtokenizerディレクトリも生成し、重みと一緒に配置することを明記 |
+| 旧モデルとの互換性 | v2のbase／VoiceDesignに対応 | v2・v3のbase／VoiceDesignを引き続き推論可能。旧コードはv3・v2・v1タグから参照可能 |
+
+参照長の上限はcheckpointごとの仕様です。v3 READMEには上限秒数の記載がないため、この比較ではv3の上限値を推定していません。v4の長時間参照は、同じ話者の短いclipを複数組み合わせる構成が推奨され、評価では合計約30秒で改善の大部分が得られたとされています。単一の長い録音も入力できますが、その形式の効果は未評価です。[公式READMEの複数参照説明](https://github.com/Aratako/Irodori-TTS/blob/main/README.md#multiple-reference-clips)
+
+**v3から継続する機能**は、自動音声長予測・音声長の倍率指定、VoiceDesignでのcaptionと参照音声の併用、絵文字によるスタイル制御、48kHzのDACVAEコーデック、SilentCipherによる透かし、LoRA、Speaker Inversionです。これらはv4で初めて追加された機能ではありません。v1のcheckpoint・前処理がv2/v3/v4と非互換である点も継続しています。
+
+上流のモデル統合と、このラッパーのUI/API統合は別の変更です。上流READMEには現在もGradio UIを7860と7861で起動する例があり、両方の既定モデルがv4.1-Smallになっています。このラッパーはUI/APIを7860へ統合しています。
+
+### v4系モデルの違い
+
+[上流README](https://github.com/Aratako/Irodori-TTS)、[MeanFlowガイド](https://github.com/Aratako/Irodori-TTS/blob/main/docs/meanflow.md)、作者の公式モデルカードで確認できる内容をまとめています（2026-10-11確認）。
+
+以下の通常モデルは、日本語のVoice Cloning・captionによるVoiceDesign・両者の併用・絵文字によるスタイル制御に対応します。参照音声は単一または複数、合計最大120秒。音声長の自動予測と48kHz出力も共通です。
+
+| モデル（公式モデルカード） | 主な違い | ステップ既定 | モデルのライセンス表記 |
 |---|---|---|---|
-| `ref` | `http://localhost:7860` | `irodori-tts-500m` | `Aratako/Irodori-TTS-500M-v3` |
-| `voicedesign` | `http://localhost:7861` | `irodori-tts-voicedesign` | VoiceDesign 系 checkpoint |
+| [v4-Small](https://huggingface.co/Aratako/Irodori-TTS-v4-Small) | 約766Mパラメータ。ModernBERT-jaをテキスト・caption共通エンコーダに採用したv4の基本モデル | RF 40 | MIT |
+| [v4.1-Small](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small) | v4-Smallの音声長予測器だけを置換・再学習。長さの過大推定に起因する生成エラーを減らす更新。RF-DiTと各条件エンコーダは同じ | RF 40 | MIT |
+| [v4.1-Small-MF](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-MF) | v4.1-SmallをMeanFlowで蒸留した少ステップ生成版。条件エンコーダ・音声長予測器を固定し、DiTを学習。量子化とは別の変更 | MeanFlow 4 | MIT |
+| [v4-Large](https://huggingface.co/Aratako/Irodori-TTS-v4-Large) | 約3.29Bパラメータ。DiTと参照エンコーダを拡大し、共通エンコーダをT5Gemma 2へ変更。音声長予測器は本体の学習後に別途学習 | RF 40 | Gemma Terms of Use |
 
-UI 用エンドポイント: `/` (Gradio)、API ドキュメント: `/api/docs`。
+ステップ既定はUIのNum Stepsを空欄、APIのnum_stepsを未指定にした場合です。RFはRectified Flow、MFはMeanFlowを指します。
 
-## モデルキャッシュ
+選択時に参考になる公式評価・推論上の違い:
 
-初回起動時に Gradio UI / API 経由で選択した checkpoint が `~/.cache/huggingface/` にダウンロードされ、コンテナにマウントされます。2 回目以降はキャッシュを利用。
+- **v4.1-Small**: v4-Smallのモデルカードで推奨される更新版で、このラッパーの既定です。同条件のJSUT評価でSentence Kana-CERはv4-Smallの3.49%から3.43%へ改善しています。[v4.1の更新内容・評価](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small#-benchmarks)
+- **v4.1-Small-MF**: 4ステップのRFより読み精度・話者類似度が改善し、40ステップRFに近づくよう学習されています。JSUTのSentence Kana-CERはRF 4が6.50%、MF 4が3.78%、RF 40が3.43%。CFGは蒸留時に学習済みで、推論時のCFG値やSway Samplingは適用されません。[MeanFlowの評価・制約](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-MF)
+- **v4-Large**: 公開された内部自動評価では、v4-Smallよりcaptionへの追従スコアとCAM++話者類似度の平均値が高くなっています。一方、読み精度の評価ではv4.1-Smallが上回り、JSUTのSentence Kana-CERはSmall 3.43%、Large 3.67%です。用途ごとに結果が異なります。[Largeの評価](https://huggingface.co/Aratako/Irodori-TTS-v4-Large#-benchmarks)
 
-## 参照音声 (`reference_audio/`)
+CERは文字誤り率で、低いほど良い指標です。上記のJSUT値はFP32・5 seedの平均で、RFは40または4ステップ、text CFG 3.0、参照音声・captionなしの条件です。MFは蒸留済みのguidanceを使用します。モデルカード間でJoyo評価の版が異なるため、その数値は混在させて比較しません。公開された自動評価は、人が聴いた自然さや音質の順位を示すものではありません。
 
-ディレクトリは `.gitkeep` のみ追跡し、音声ファイル本体は git 追跡外(`.gitignore`)。
+### 精度・量子化と本環境
 
-実音声の配置はデプロイ側で行う想定です(例: 親リポジトリ `AI_Shibutani/scripts/sync_reference_audio.sh` から `AI_Shibutani/assets/reference_audio/` をコピー)。コンテナ内では `/app/reference_audio` に read-only マウントされ、REST API の `ref_wav_path` から参照できます。
+RTX 2080（VRAM 8GB）向けの既定はモデルCUDA/FP32、コーデックCPU/FP32です。Composeの `IRODORI_MODEL_PRECISION`、`IRODORI_CODEC_DEVICE`、`IRODORI_CODEC_PRECISION` で変更できます。UIでもデバイス・精度を選択可能です。BF16非対応GPUではBF16を選択肢から除外します。
 
-API は traversal 防止のため `ref_wav_path` を `/app/reference_audio` 配下に限定します。
+公式の量子化版は、[v4-Small-Quantized](https://huggingface.co/Aratako/Irodori-TTS-v4-Small-Quantized)、[v4.1-Small-Quantized](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-Quantized)、[v4-Large-Quantized](https://huggingface.co/Aratako/Irodori-TTS-v4-Large-Quantized)です。それぞれ元モデルを学習後にtorchaoで量子化した版で、元モデルの条件入力・生成方式を引き継ぎます。MFの少ステップ化と、量子化によるメモリ削減は別の仕組みです。
 
-## 長文 auto_split
+weight-onlyは対応するLinear層の重みを量子化し、dynamicは実行時の中間値（activation）も量子化します。公式版ではプロジェクタ・AdaLN・音声長予測器などはBF16のままで、コーデックも量子化の対象外です。[上流の量子化説明](https://github.com/Aratako/Irodori-TTS#quantization)
 
-Diffusion ベース TTS は長文で後半が崩れやすいため、句読点優先の chunk 分割 → 順次合成 → 無音連結を opt-in で選べます。
+量子化版の指定例:
 
-### Gradio UI
+```text
+Aratako/Irodori-TTS-v4.1-Small-Quantized/int8-weight-only
+Aratako/Irodori-TTS-v4.1-Small-Quantized/int8-dynamic
+Aratako/Irodori-TTS-v4.1-Small-Quantized/int4-weight-only
+Aratako/Irodori-TTS-v4.1-Small-Quantized/float8-weight-only
+Aratako/Irodori-TTS-v4.1-Small-Quantized/float8-dynamic
+```
 
-"Sampling" アコーディオン内の以下のコントロール:
+| 量子化形式 | 公式版の重み・中間値 | GPU要件・位置づけ |
+|---|---|---|
+| INT8 weight-only | INT8重み / BF16計算（W8A16） | NVIDIA CUDA。公式の汎用INT8推奨形式 |
+| INT8 dynamic | INT8重み / 対応Linear層の中間値も動的INT8（W8A8） | NVIDIA CUDA。実行時にも量子化するため、速度は環境に依存 |
+| INT4 weight-only | INT4重み / BF16計算（W4A16、group size 128） | NVIDIA CC 8.0以上。公開variant中で最小のcheckpoint。RTX 2080では使用不可 |
+| FP8 weight-only | FP8重み / BF16中間値 | NVIDIA CC 8.9以上。RTX 2080では使用不可 |
+| FP8 dynamic | FP8重み / 対応Linear層の中間値も動的FP8 | NVIDIA CC 8.9以上。RTX 2080では使用不可 |
 
-| コントロール | 既定 | 範囲 | 役割 |
-|---|---|---|---|
-| Auto Split | OFF | bool | opt-in スイッチ |
-| Max Chars / Chunk | 200 | 50–500 | 1 chunk の最大文字数 |
-| Chunk Silence (ms) | 150 | 0–1000 | chunk 間の無音長 |
+不対応のINT4/FP8を選んだ場合は理由を表示し、APIは400を返します。選択肢への掲載はすべてのGPUでの動作保証ではありません。Largeの利用もVRAM容量に依存します。
 
-### REST API パラメタ(multipart/form-data)
+上記のBF16は公式モデルカードの構成です。本環境のRTX 2080では、v4.1-SmallのINT8 weight-only / dynamicをFP32で実行し、音声生成と通常版へのモデル切替を確認済みです。このFP32実行は本環境での実験扱いです。検証時のINT8 dynamicは通常版より合成に時間がかかりました。Largeの音声生成は本環境では未検証です。
 
-`auto_split=true`、`max_chars_per_chunk` (既定 200)、`chunk_silence_ms` (既定 150) を追加可能。
-
-### 制約と挙動
-
-- `auto_split=true` 時は `num_candidates=1` を強制(chunk × candidate の組み合わせが意味不明になるため)
-- 全 chunk で同一 seed / ref_wav / CFG を共有して声質の一貫性を担保
-- 1 chunk 目の `used_seed` 確定後、それを後続 chunk に流用
-
-### 分割アルゴリズム(`irodori_tts_api/text_splitter.py`)
-
-1. 改行を正規化(CRLF→LF、CR→LF、連続改行を1つに、先頭末尾の改行と周囲空白を除去)。「文字と文字に挟まれた改行」だけが分割キーとして残る
-2. 句点 `。．！？!?` で文単位に
-3. 超過する文は読点 `、,` で再分割
-4. それでも超えるなら `max_chars` で強制カット
-5. 極端に短い断片(3 文字未満)は直前 chunk に併合
-
-## 改行の取り扱い
-
-クライアント側(multipart parser 経由など)で `\r` / `\n` が紛れ込んでも合成音が乱れないよう、以下のレイヤで吸収:
-
-| 経路 | 動作 |
-|---|---|
-| `auto_split=true` (UI / API 共通) | `text_splitter` が改行を正規化。中間改行は分割キーとして保持、ノイズ改行(先頭末尾・連続・単独 CR)は除去 |
-| `auto_split=false` (UI / API 共通) | 合成呼び出し直前で `\r` / `\n` を空白に置換し、TTS に改行リテラルが渡らないようにする |
+モデルと同梱tokenizerは初回使用時に取得し、マウントしたHugging Faceキャッシュを再利用します。量子化モデルは選択したvariantとtokenizerだけを取得します。
 
 ## REST API
 
-`POST /api/v1/synthesize` を `ref` / `voicedesign` の各 profile で公開(同じパスだが別 service)。Reference 側のサンプル:
+`POST /api/v1/synthesize` はmultipart/form-dataを受け付けます。既存の単一 `ref_wav_path` リクエストをそのまま使用できます。
 
 ```bash
 curl -X POST http://localhost:7860/api/v1/synthesize \
@@ -107,44 +114,80 @@ curl -X POST http://localhost:7860/api/v1/synthesize \
   -F seed=677
 ```
 
-成功時 JSON 例:
+参照音声とcaptionは任意です。参照のみ、captionのみ、両方、text-onlyの合成に対応します。caption非対応checkpointへのcaption指定は400を返します。
+
+```bash
+curl -X POST http://localhost:7860/api/v1/synthesize \
+  -F text='こんにちは。' \
+  -F caption='落ち着いた自然な声' \
+  -F ref_wav_paths=/app/reference_audio/ref_01.wav \
+  -F ref_wav_paths=/app/reference_audio/ref_02.wav
+```
+
+複数参照は `ref_wav_paths` を繰り返して順序付きで指定します。単一の `ref_wav_path` との同時指定は400です。UIでは複数アップロードし、表示順を変更できます。参照長の上限はcheckpoint設定に従い、v4-Small系では合計120秒です。
+
+| パラメータ | 既定 |
+|---|---|
+| text | 必須 |
+| caption | 空欄 |
+| ref_wav_path / ref_wav_paths | 未指定 |
+| checkpoint | v4.1-Small |
+| num_steps | モデル既定（RF: 40、MeanFlow: 4） |
+| num_candidates | 1 |
+| seed | ランダム |
+| cfg_scale_text / cfg_scale_caption / cfg_scale_speaker | 3.0 / 4.0 / 5.0 |
+| duration_scale | 1.0 |
+| auto_split | false |
+| max_chars_per_chunk / chunk_silence_ms | 200 / 150 |
+
+明示的な `num_steps` は維持します。MeanFlowでは上流の仕様に従いCFGやRF sampler設定が無視されます。
+
+成功レスポンスの構造とWAV取得URLは従来どおりです:
 
 ```json
 {
-  "service": "irodori-tts-500m",
+  "service": "irodori-tts",
   "sample_rate": 48000,
   "used_seed": 677,
   "candidates": [
-    {"index": 1, "path": "/app/api_outputs/sample_..._001.wav", "url": "/files/sample_..._001.wav"}
+    {"index": 1, "path": "/app/api_outputs/sample_001.wav", "url": "/files/sample_001.wav"}
   ],
-  "stage_timings": [["chunk_1/sample_rf", 0.42], ["chunk_2/sample_rf", 0.45]],
+  "stage_timings": [["sample_rf", 0.42]],
   "total_to_decode": 1.20,
-  "messages": ["split into 2 chunks (silence=150ms)", "..."]
+  "messages": []
 }
 ```
 
-`url` フィールドは `GET /files/{name}` で取得可能(`/app/api_outputs/` 配下のみ、ファイル名は `sample_*.wav` パターンに限定)。
-
-### エンドポイント一覧
-
 | Method | Path | 用途 |
 |---|---|---|
-| `GET` | `/api/v1/health` | service 名と default_checkpoint を返す |
-| `POST` | `/api/v1/synthesize` | 合成(profile によって挙動が異なる) |
-| `GET` | `/files/{name}` | 生成 wav の取得 |
-| `GET` | `/api/docs` | Swagger UI |
-| `GET` | `/api/openapi.json` | OpenAPI スキーマ |
-| `GET` | `/` | Gradio UI |
+| GET | /api/v1/health | service名・既定checkpoint |
+| POST | /api/v1/synthesize | 音声合成 |
+| GET | /files/{name} | 生成WAV取得 |
+| GET | /api/docs | Swagger UI |
+| GET | /api/openapi.json | OpenAPIスキーマ |
+| GET | / | Gradio UI |
 
-## テスト
+不正入力・参照ファイル不在は400、CUDA OOMは507、その他の合成失敗は500を返します。
+
+## 参照音声・長文
+
+`reference_audio/` の実音声はGit追跡外で、コンテナ内の `/app/reference_audio` にread-onlyマウントします。APIの参照パスはこの配下に限定し、相対パスも受け付けます。生成WAVは `api_outputs/irodori-tts/` に保存します。旧VoiceDesignの出力ディレクトリは削除しません。
+
+`auto_split=true` は句点・改行を優先して分割し、順次合成後に無音を挟んで連結します。`num_candidates=1` が必要です。全chunkで同じ参照音声・caption・seedを共有し、seed未指定なら最初のchunkで確定した値を再利用します。
+
+CRLF・CR・連続改行・先頭末尾の改行を正規化し、分割しない場合は改行を空白に置換します。UI/APIの合成・モデル切替は共通の排他で制御します。
+
+## テスト・v3への復旧
+
+依存関係がインストール済みの環境で実行します:
 
 ```bash
-python3 -m pytest tests/
+PYTHONPATH=Irodori-TTS:. python3 -m pytest tests/
 ```
 
-`tests/test_text_splitter.py` で改行正規化と分割ロジックを 14 件カバー(Dify 由来の `\r\n` 混入、単独 CR、先頭末尾改行のノイズ除去を含む)。
+v3最終状態は注釈付きタグ `v3-final`（親リポジトリ `4124c1f`、上流 `5f103a5`）です。復旧時は別チェックアウトからタグとサブモジュールを取得し、その構成で起動します。v3イメージと既存モデルキャッシュは維持します。
 
 ## クレジット
 
 - 元リポジトリ: [Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS)
-- ライセンス: 元リポジトリのライセンスに従います
+- コード・モデルのライセンスおよび利用条件は元リポジトリと各モデルカードを参照してください。

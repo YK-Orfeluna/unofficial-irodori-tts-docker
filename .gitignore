@@ -1,5 +1,7 @@
 pretrained_models/
 outputs/
+api_outputs/
+gradio_outputs/
 data/
 wandb/
 __pycache__/

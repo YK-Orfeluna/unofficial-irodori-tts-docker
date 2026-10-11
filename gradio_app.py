@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -11,11 +12,8 @@ from irodori_tts.gradio_emoji_palette import EMOJI_PALETTE_CSS, build_emoji_pale
 from irodori_tts.inference_runtime import (
     RuntimeKey,
     SamplingRequest,
-    clear_cached_runtime,
     default_runtime_device,
-    get_cached_runtime,
     list_available_runtime_devices,
-    list_available_runtime_precisions,
     save_wav,
 )
 from irodori_tts.speaker_inversion import is_speaker_inversion_safetensors_path
@@ -25,6 +23,11 @@ from irodori_tts_api.inference_facade import (
     run_split_synthesis,
 )
 from irodori_tts_api.runtime_helpers import (
+    DEFAULT_CHECKPOINT,
+    RUNTIME_LOCK,
+    load_runtime,
+    runtime_precision_choices,
+    unload_runtime,
     build_runtime_key as _shared_build_runtime_key,
     resolve_precision_from_env,
 )
@@ -35,8 +38,22 @@ GRADIO_AUDIO_COLS_PER_ROW = 8
 
 
 HF_CHECKPOINT_CHOICES = [
+    DEFAULT_CHECKPOINT,
+    "Aratako/Irodori-TTS-v4-Small",
+    "Aratako/Irodori-TTS-v4.1-Small-MF",
+    "Aratako/Irodori-TTS-v4-Large",
+    "Aratako/Irodori-TTS-600M-v3-VoiceDesign",
+    "Aratako/Irodori-TTS-500M-v2-VoiceDesign",
     "Aratako/Irodori-TTS-500M-v3",
     "Aratako/Irodori-TTS-500M-v2",
+    *[
+        f"Aratako/{model}-Quantized/{variant}"
+        for model in ("Irodori-TTS-v4.1-Small", "Irodori-TTS-v4-Small", "Irodori-TTS-v4-Large")
+        for variant in (
+            "int8-weight-only", "int8-dynamic", "int4-weight-only",
+            "float8-weight-only", "float8-dynamic",
+        )
+    ],
 ]
 
 
@@ -61,10 +78,7 @@ def _checkpoint_choices() -> list[str]:
 
 
 def _default_checkpoint() -> str:
-    local = _local_checkpoint_candidates()
-    if local:
-        return local[-1]
-    return HF_CHECKPOINT_CHOICES[0]
+    return DEFAULT_CHECKPOINT
 
 
 def _default_model_device() -> str:
@@ -72,11 +86,11 @@ def _default_model_device() -> str:
 
 
 def _default_codec_device() -> str:
-    return default_runtime_device()
+    return os.environ.get("IRODORI_CODEC_DEVICE", "cpu")
 
 
 def _precision_choices_for_device(device: str) -> list[str]:
-    return list_available_runtime_precisions(device)
+    return runtime_precision_choices(device)
 
 
 def _on_model_device_change(device: str) -> gr.Dropdown:
@@ -135,12 +149,6 @@ def _format_timings(stage_timings: list[tuple[str, float]], total_to_decode: flo
     return "\n".join(lines)
 
 
-def _resolve_ref_wav(uploaded_audio: str | None) -> str | None:
-    if uploaded_audio is not None and str(uploaded_audio).strip() != "":
-        return str(uploaded_audio)
-    return None
-
-
 def _coerce_gradio_file_path(value: object) -> str | None:
     if value is None:
         return None
@@ -158,6 +166,12 @@ def _coerce_gradio_file_path(value: object) -> str | None:
         return str(candidate)
     text = str(value).strip()
     return text or None
+
+
+def _resolve_ref_wavs(uploaded_audio: object) -> list[str]:
+    values = uploaded_audio if isinstance(uploaded_audio, (list, tuple)) else [uploaded_audio]
+    paths = [_coerce_gradio_file_path(value) for value in values]
+    return [path for path in paths if path is not None]
 
 
 def _resolve_speaker_embedding(
@@ -187,7 +201,7 @@ def _build_runtime_key(
         codec_device=codec_device,
         codec_precision=codec_precision,
         log_prefix="gradio",
-        reject_speaker_inversion=False,
+        reject_speaker_inversion=True,
     )
 
 
@@ -198,26 +212,27 @@ def _load_model(
     codec_device: str,
     codec_precision: str,
 ) -> str:
-    runtime_key = _build_runtime_key(
-        checkpoint=checkpoint,
-        model_device=model_device,
-        model_precision=model_precision,
-        codec_device=codec_device,
-        codec_precision=codec_precision,
-    )
-    _, reloaded = get_cached_runtime(runtime_key)
-    if reloaded:
-        status = "loaded model into memory"
-    else:
-        status = "model already loaded; reused existing runtime"
-    return (
-        f"{status}\n"
-        f"checkpoint: {runtime_key.checkpoint}\n"
-        f"model_device: {runtime_key.model_device}\n"
-        f"model_precision: {runtime_key.model_precision}\n"
-        f"codec_device: {runtime_key.codec_device}\n"
-        f"codec_precision: {runtime_key.codec_precision}"
-    )
+    with RUNTIME_LOCK:
+        runtime_key = _build_runtime_key(
+            checkpoint=checkpoint,
+            model_device=model_device,
+            model_precision=model_precision,
+            codec_device=codec_device,
+            codec_precision=codec_precision,
+        )
+        _, reloaded = load_runtime(runtime_key)
+        if reloaded:
+            status = "loaded model into memory"
+        else:
+            status = "model already loaded; reused existing runtime"
+        return (
+            f"{status}\n"
+            f"checkpoint: {runtime_key.checkpoint}\n"
+            f"model_device: {runtime_key.model_device}\n"
+            f"model_precision: {runtime_key.model_precision}\n"
+            f"codec_device: {runtime_key.codec_device}\n"
+            f"codec_precision: {runtime_key.codec_precision}"
+        )
 
 
 def _run_generation(
@@ -227,10 +242,11 @@ def _run_generation(
     codec_device: str,
     codec_precision: str,
     text: str,
-    uploaded_audio: str | None,
+    caption: str,
+    uploaded_audio: object,
     uploaded_speaker_embedding: object,
     speaker_embedding_path_raw: str,
-    num_steps: int,
+    num_steps: str | None,
     num_candidates: int,
     seed_raw: str,
     seconds_raw: str,
@@ -239,6 +255,7 @@ def _run_generation(
     sway_coeff: float,
     cfg_guidance_mode: str,
     cfg_scale_text: float,
+    cfg_scale_caption: float,
     cfg_scale_speaker: float,
     cfg_scale_raw: str,
     cfg_min_t: float,
@@ -255,165 +272,181 @@ def _run_generation(
     max_chars_per_chunk: int,
     chunk_silence_ms: int,
 ) -> tuple[object, ...]:
-    def stdout_log(msg: str) -> None:
-        print(msg, flush=True)
+    with RUNTIME_LOCK:
+        def stdout_log(msg: str) -> None:
+            print(msg, flush=True)
 
-    runtime_key = _build_runtime_key(
-        checkpoint=checkpoint,
-        model_device=model_device,
-        model_precision=model_precision,
-        codec_device=codec_device,
-        codec_precision=codec_precision,
-    )
-
-    if str(text).strip() == "":
-        raise ValueError("text is required.")
-    requested_candidates = int(num_candidates)
-    if requested_candidates <= 0:
-        raise ValueError("num_candidates must be >= 1.")
-    if requested_candidates > MAX_GRADIO_CANDIDATES:
-        raise ValueError(f"num_candidates must be <= {MAX_GRADIO_CANDIDATES}.")
-
-    cfg_scale = _parse_optional_float(cfg_scale_raw, "cfg_scale")
-    truncation_factor = _parse_optional_float(truncation_factor_raw, "truncation_factor")
-    rescale_k = _parse_optional_float(rescale_k_raw, "rescale_k")
-    rescale_sigma = _parse_optional_float(rescale_sigma_raw, "rescale_sigma")
-    speaker_kv_scale = _parse_optional_float(speaker_kv_scale_raw, "speaker_kv_scale")
-    speaker_kv_min_t = _parse_optional_float(speaker_kv_min_t_raw, "speaker_kv_min_t")
-    speaker_kv_max_layers = _parse_optional_int(speaker_kv_max_layers_raw, "speaker_kv_max_layers")
-    seed = _parse_optional_int(seed_raw, "seed")
-    manual_seconds = _parse_optional_float(seconds_raw, "seconds")
-    lora_adapter = _parse_optional_str(lora_adapter_raw)
-
-    ref_wav = _resolve_ref_wav(uploaded_audio=uploaded_audio)
-    speaker_embedding = _resolve_speaker_embedding(
-        uploaded_embedding=uploaded_speaker_embedding,
-        speaker_embedding_path_raw=speaker_embedding_path_raw,
-    )
-    if ref_wav is not None and speaker_embedding is not None:
-        raise ValueError("Reference audio and speaker embedding are mutually exclusive.")
-    no_ref = ref_wav is None and speaker_embedding is None
-    ref_normalize_db = -16.0
-    ref_ensure_max = True
-
-    runtime, reloaded = get_cached_runtime(runtime_key)
-    stdout_log(f"[gradio] runtime: {'reloaded' if reloaded else 'reused'}")
-    stdout_log(
-        (
-            "[gradio] request: model_device={} model_precision={} codec_device={} codec_precision={} "
-            "mode={} schedule={} sway_coeff={} seconds={} duration_scale={} steps={} seed={} no_ref={} candidates={}"
-        ).format(
-            model_device,
-            model_precision,
-            codec_device,
-            codec_precision,
-            cfg_guidance_mode,
-            t_schedule_mode,
-            sway_coeff,
-            "auto" if manual_seconds is None else manual_seconds,
-            duration_scale,
-            num_steps,
-            "random" if seed is None else seed,
-            no_ref,
-            requested_candidates,
-        )
-    )
-    if speaker_embedding is not None:
-        stdout_log(f"[gradio] speaker_embedding: {speaker_embedding}")
-
-    if bool(auto_split) and requested_candidates != 1:
-        raise ValueError("auto_split requires Num Candidates == 1.")
-
-    def build_request(text_value: str, seed_value: int | None) -> SamplingRequest:
-        return SamplingRequest(
-            text=text_value,
-            ref_wav=ref_wav,
-            ref_latent=None,
-            ref_embed=speaker_embedding,
-            no_ref=bool(no_ref),
-            ref_normalize_db=ref_normalize_db,
-            ref_ensure_max=bool(ref_ensure_max),
-            num_candidates=1 if bool(auto_split) else requested_candidates,
-            decode_mode="sequential",
-            seconds=manual_seconds,
-            duration_scale=float(duration_scale),
-            max_ref_seconds=30.0,
-            max_text_len=None,
-            num_steps=int(num_steps),
-            seed=None if seed_value is None else int(seed_value),
-            cfg_guidance_mode=str(cfg_guidance_mode),
-            cfg_scale_text=float(cfg_scale_text),
-            cfg_scale_speaker=float(cfg_scale_speaker),
-            cfg_scale=cfg_scale,
-            cfg_min_t=float(cfg_min_t),
-            cfg_max_t=float(cfg_max_t),
-            truncation_factor=truncation_factor,
-            rescale_k=rescale_k,
-            rescale_sigma=rescale_sigma,
-            context_kv_cache=bool(context_kv_cache),
-            speaker_kv_scale=speaker_kv_scale,
-            speaker_kv_min_t=speaker_kv_min_t,
-            speaker_kv_max_layers=speaker_kv_max_layers,
-            t_schedule_mode=str(t_schedule_mode),
-            sway_coeff=float(sway_coeff),
-            trim_tail=True,
-            lora_adapter=lora_adapter,
+        runtime_key = _build_runtime_key(
+            checkpoint=checkpoint,
+            model_device=model_device,
+            model_precision=model_precision,
+            codec_device=codec_device,
+            codec_precision=codec_precision,
         )
 
-    if bool(auto_split):
-        chunks = split_text_for_tts(str(text), max_chars=int(max_chars_per_chunk))
-        if not chunks:
+        if str(text).strip() == "":
             raise ValueError("text is required.")
-        stdout_log(f"[gradio] auto_split: {len(chunks)} chunks (max={int(max_chars_per_chunk)})")
-        result = run_split_synthesis(
-            chunks=chunks,
-            build_request=build_request,
-            initial_seed=seed,
-            runtime=runtime,
-            log_fn=stdout_log,
-            silence_ms=int(chunk_silence_ms),
+        requested_candidates = int(num_candidates)
+        if requested_candidates <= 0:
+            raise ValueError("num_candidates must be >= 1.")
+        if requested_candidates > MAX_GRADIO_CANDIDATES:
+            raise ValueError(f"num_candidates must be <= {MAX_GRADIO_CANDIDATES}.")
+
+        parsed_num_steps = _parse_optional_int(num_steps, "num_steps")
+        if parsed_num_steps is not None and parsed_num_steps < 1:
+            raise ValueError("num_steps must be >= 1 or blank.")
+        if auto_split and (max_chars_per_chunk < 1 or chunk_silence_ms < 0):
+            raise ValueError("Invalid chunk size or silence duration.")
+        cfg_scale = _parse_optional_float(cfg_scale_raw, "cfg_scale")
+        truncation_factor = _parse_optional_float(truncation_factor_raw, "truncation_factor")
+        rescale_k = _parse_optional_float(rescale_k_raw, "rescale_k")
+        rescale_sigma = _parse_optional_float(rescale_sigma_raw, "rescale_sigma")
+        speaker_kv_scale = _parse_optional_float(speaker_kv_scale_raw, "speaker_kv_scale")
+        speaker_kv_min_t = _parse_optional_float(speaker_kv_min_t_raw, "speaker_kv_min_t")
+        speaker_kv_max_layers = _parse_optional_int(speaker_kv_max_layers_raw, "speaker_kv_max_layers")
+        seed = _parse_optional_int(seed_raw, "seed")
+        manual_seconds = _parse_optional_float(seconds_raw, "seconds")
+        lora_adapter = _parse_optional_str(lora_adapter_raw)
+
+        ref_wavs = _resolve_ref_wavs(uploaded_audio)
+        speaker_embedding = _resolve_speaker_embedding(
+            uploaded_embedding=uploaded_speaker_embedding,
+            speaker_embedding_path_raw=speaker_embedding_path_raw,
         )
-    else:
-        # auto_split=False では改行をそのまま渡すと合成音が乱れるため空白に置換する
-        sanitized_text = str(text).replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
-        result = runtime.synthesize(build_request(sanitized_text, seed), log_fn=stdout_log)
+        if ref_wavs and speaker_embedding is not None:
+            raise ValueError("Reference audio and speaker embedding are mutually exclusive.")
+        no_ref = not ref_wavs and speaker_embedding is None
+        ref_normalize_db = -16.0
+        ref_ensure_max = True
 
-    out_dir = Path("gradio_outputs")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    out_paths: list[str] = []
-    for i, audio in enumerate(result.audios, start=1):
-        out_path = save_wav(
-            out_dir / f"sample_{stamp}_{i:03d}.wav",
-            audio.float(),
-            result.sample_rate,
+        runtime, reloaded = load_runtime(runtime_key)
+        caption_value = (caption or "").strip()
+        if caption_value and not runtime.model_cfg.use_caption_condition:
+            raise ValueError("Loaded checkpoint does not enable caption conditioning.")
+        if not runtime.model_cfg.use_speaker_condition_resolved:
+            ref_wavs = []
+            speaker_embedding = None
+            no_ref = True
+        stdout_log(f"[gradio] runtime: {'reloaded' if reloaded else 'reused'}")
+        stdout_log(
+            (
+                "[gradio] request: model_device={} model_precision={} codec_device={} codec_precision={} "
+                "mode={} schedule={} sway_coeff={} seconds={} duration_scale={} steps={} seed={} no_ref={} candidates={}"
+            ).format(
+                model_device,
+                model_precision,
+                codec_device,
+                codec_precision,
+                cfg_guidance_mode,
+                t_schedule_mode,
+                sway_coeff,
+                "auto" if manual_seconds is None else manual_seconds,
+                duration_scale,
+                num_steps,
+                "random" if seed is None else seed,
+                no_ref,
+                requested_candidates,
+            )
         )
-        out_paths.append(str(out_path))
+        if speaker_embedding is not None:
+            stdout_log(f"[gradio] speaker_embedding: {speaker_embedding}")
 
-    runtime_msg = "runtime: reloaded" if reloaded else "runtime: reused"
-    detail_lines = [
-        runtime_msg,
-        f"seed_used: {result.used_seed}",
-        f"candidates: {len(result.audios)}",
-        *[f"saved[{i}]: {path}" for i, path in enumerate(out_paths, start=1)],
-        *result.messages,
-    ]
-    detail_text = "\n".join(detail_lines)
-    timing_text = _format_timings(result.stage_timings, result.total_to_decode)
-    stdout_log(f"[gradio] saved {len(out_paths)} candidates")
+        if bool(auto_split) and requested_candidates != 1:
+            raise ValueError("auto_split requires Num Candidates == 1.")
 
-    audio_updates: list[object] = []
-    for i in range(MAX_GRADIO_CANDIDATES):
-        if i < len(out_paths):
-            audio_updates.append(gr.update(value=out_paths[i], visible=True))
+        def build_request(text_value: str, seed_value: int | None) -> SamplingRequest:
+            return SamplingRequest(
+                text=text_value,
+                caption=caption_value or None,
+                ref_wavs=ref_wavs or None,
+                ref_latent=None,
+                ref_embed=speaker_embedding,
+                no_ref=bool(no_ref),
+                ref_normalize_db=ref_normalize_db,
+                ref_ensure_max=bool(ref_ensure_max),
+                num_candidates=1 if bool(auto_split) else requested_candidates,
+                decode_mode="sequential",
+                seconds=manual_seconds,
+                duration_scale=float(duration_scale),
+                max_ref_seconds=None,
+                max_text_len=None,
+                num_steps=parsed_num_steps,
+                seed=None if seed_value is None else int(seed_value),
+                cfg_guidance_mode=str(cfg_guidance_mode),
+                cfg_scale_text=float(cfg_scale_text),
+                cfg_scale_caption=float(cfg_scale_caption),
+                cfg_scale_speaker=float(cfg_scale_speaker),
+                cfg_scale=cfg_scale,
+                cfg_min_t=float(cfg_min_t),
+                cfg_max_t=float(cfg_max_t),
+                truncation_factor=truncation_factor,
+                rescale_k=rescale_k,
+                rescale_sigma=rescale_sigma,
+                context_kv_cache=bool(context_kv_cache),
+                speaker_kv_scale=speaker_kv_scale,
+                speaker_kv_min_t=speaker_kv_min_t,
+                speaker_kv_max_layers=speaker_kv_max_layers,
+                t_schedule_mode=str(t_schedule_mode),
+                sway_coeff=float(sway_coeff),
+                trim_tail=True,
+                lora_adapter=lora_adapter,
+            )
+
+        if bool(auto_split):
+            chunks = split_text_for_tts(str(text), max_chars=int(max_chars_per_chunk))
+            if not chunks:
+                raise ValueError("text is required.")
+            stdout_log(f"[gradio] auto_split: {len(chunks)} chunks (max={int(max_chars_per_chunk)})")
+            result = run_split_synthesis(
+                chunks=chunks,
+                build_request=build_request,
+                initial_seed=seed,
+                runtime=runtime,
+                log_fn=stdout_log,
+                silence_ms=int(chunk_silence_ms),
+            )
         else:
-            audio_updates.append(gr.update(value=None, visible=False))
-    return (*audio_updates, detail_text, timing_text)
+            # auto_split=False では改行をそのまま渡すと合成音が乱れるため空白に置換する
+            sanitized_text = str(text).replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+            result = runtime.synthesize(build_request(sanitized_text, seed), log_fn=stdout_log)
+
+        out_dir = Path("gradio_outputs")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        out_paths: list[str] = []
+        for i, audio in enumerate(result.audios, start=1):
+            out_path = save_wav(
+                out_dir / f"sample_{stamp}_{i:03d}.wav",
+                audio.float(),
+                result.sample_rate,
+            )
+            out_paths.append(str(out_path))
+
+        runtime_msg = "runtime: reloaded" if reloaded else "runtime: reused"
+        detail_lines = [
+            runtime_msg,
+            f"seed_used: {result.used_seed}",
+            f"candidates: {len(result.audios)}",
+            *[f"saved[{i}]: {path}" for i, path in enumerate(out_paths, start=1)],
+            *result.messages,
+        ]
+        detail_text = "\n".join(detail_lines)
+        timing_text = _format_timings(result.stage_timings, result.total_to_decode)
+        stdout_log(f"[gradio] saved {len(out_paths)} candidates")
+
+        audio_updates: list[object] = []
+        for i in range(MAX_GRADIO_CANDIDATES):
+            if i < len(out_paths):
+                audio_updates.append(gr.update(value=out_paths[i], visible=True))
+            else:
+                audio_updates.append(gr.update(value=None, visible=False))
+        return (*audio_updates, detail_text, timing_text)
 
 
 def _clear_runtime_cache() -> str:
-    clear_cached_runtime()
-    return "cleared loaded model from memory"
+    with RUNTIME_LOCK:
+        unload_runtime()
+        return "cleared loaded model from memory"
 
 
 def build_ui() -> gr.Blocks:
@@ -424,10 +457,12 @@ def build_ui() -> gr.Blocks:
     model_precision_choices = _precision_choices_for_device(default_model_device)
     codec_precision_choices = _precision_choices_for_device(default_codec_device)
 
-    with gr.Blocks(title="Irodori-TTS Gradio", css=EMOJI_PALETTE_CSS) as demo:
-        gr.Markdown("# Irodori-TTS Inference (Cached Runtime)")
+    with gr.Blocks(title="Irodori-TTS Gradio") as demo:
+        gr.Markdown("# Irodori-TTS — Voice Cloning / VoiceDesign")
         gr.Markdown(
-            "When settings are unchanged, runtime is reused and only sampling/decoding runs."
+            "v4.1-Small is the default; other checkpoints and quantized variants can be selected. "
+            "INT4 requires CC 8.0+, FP8 requires CC 8.9+. RTX 2080 uses FP32; "
+            "INT8 support is experimental on this GPU."
         )
 
         with gr.Row():
@@ -475,11 +510,15 @@ def build_ui() -> gr.Blocks:
                 elem_id="irodori-text-input",
             )
             build_emoji_palette(text, open=False)
+        caption = gr.Textbox(label="Caption / Style Prompt (optional)", lines=3)
         with gr.Tabs():
             with gr.Tab("Reference Audio"):
-                uploaded_audio = gr.Audio(
-                    label="Reference Audio Upload (optional)",
+                uploaded_audio = gr.File(
+                    label="Reference Audio Uploads (optional; concatenated in displayed order)",
                     type="filepath",
+                    file_count="multiple",
+                    file_types=["audio"],
+                    allow_reordering=True,
                 )
             with gr.Tab("Speaker Embedding"):
                 with gr.Row():
@@ -497,7 +536,9 @@ def build_ui() -> gr.Blocks:
 
         with gr.Accordion("Sampling", open=True):
             with gr.Row():
-                num_steps = gr.Slider(label="Num Steps", minimum=1, maximum=120, value=40, step=1)
+                num_steps = gr.Textbox(
+                    label="Num Steps", value="", placeholder="Auto (RF: 40, MeanFlow: 4)"
+                )
                 num_candidates = gr.Slider(
                     label="Num Candidates",
                     minimum=1,
@@ -542,6 +583,9 @@ def build_ui() -> gr.Blocks:
                     maximum=10.0,
                     value=3.0,
                     step=0.1,
+                )
+                cfg_scale_caption = gr.Slider(
+                    label="CFG Scale Caption", minimum=0.0, maximum=10.0, value=4.0, step=0.1
                 )
                 cfg_scale_speaker = gr.Slider(
                     label="CFG Scale Speaker",
@@ -623,6 +667,7 @@ def build_ui() -> gr.Blocks:
                 codec_device,
                 codec_precision,
                 text,
+                caption,
                 uploaded_audio,
                 uploaded_speaker_embedding,
                 speaker_embedding_path_raw,
@@ -635,6 +680,7 @@ def build_ui() -> gr.Blocks:
                 sway_coeff,
                 cfg_guidance_mode,
                 cfg_scale_text,
+                cfg_scale_caption,
                 cfg_scale_speaker,
                 cfg_scale_raw,
                 cfg_min_t,
@@ -680,7 +726,7 @@ def build_ui() -> gr.Blocks:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Gradio + REST API app for Irodori-TTS (500M reference).")
+    parser = argparse.ArgumentParser(description="Gradio + REST API app for Irodori-TTS.")
     parser.add_argument("--server-name", default="127.0.0.1")
     parser.add_argument("--server-port", type=int, default=7860)
     parser.add_argument("--share", action="store_true", help="ignored (kept for CLI compatibility)")
@@ -702,26 +748,25 @@ def main() -> None:
         "IRODORI_MODEL_PRECISION",
         device=default_model_device,
         fallback=_precision_choices_for_device(default_model_device)[0],
-        log_prefix="api-ref",
+        log_prefix="api",
     )
     default_codec_precision = resolve_precision_from_env(
         "IRODORI_CODEC_PRECISION",
         device=default_codec_device,
         fallback=_precision_choices_for_device(default_codec_device)[0],
-        log_prefix="api-ref",
+        log_prefix="api",
     )
 
-    app = FastAPI(title="Irodori-TTS 500M API", docs_url="/api/docs", openapi_url="/api/openapi.json")
+    app = FastAPI(title="Irodori-TTS API", docs_url="/api/docs", openapi_url="/api/openapi.json")
     attach_api(
         app,
-        endpoint_kind="ref",
         default_checkpoint=_default_checkpoint(),
         default_model_device=default_model_device,
         default_model_precision=default_model_precision,
         default_codec_device=default_codec_device,
         default_codec_precision=default_codec_precision,
     )
-    app = gr_mount.mount_gradio_app(app, demo, path="/")
+    app = gr_mount.mount_gradio_app(app, demo, path="/", css=EMOJI_PALETTE_CSS)
 
     uvicorn.run(
         app,
