@@ -9,7 +9,7 @@ import torch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from irodori_tts.inference_runtime import SamplingResult
+from irodori_tts.inference_runtime import SamplingRequest, SamplingResult
 from irodori_tts_api import app as api
 from irodori_tts_api import inference_facade as facade
 
@@ -29,7 +29,7 @@ def endpoint(tmp_path, monkeypatch):
         audio = torch.ones(1, 480) * 0.1
         return SamplingResult(
             audio, [audio] * request.num_candidates, 48000,
-            [("sample_rf", 0.01)], 0.02, request.seed or 677, [],
+            [("sample_rf", 0.01)], 0.02, 677 if request.seed is None else request.seed, [],
         )
 
     runtime = SimpleNamespace(
@@ -95,7 +95,7 @@ def test_no_reference(endpoint, caption):
     assert response.status_code == 200
     assert requests[0].no_ref
     assert requests[0].ref_wavs is None
-    assert requests[0].cfg_scale_speaker == 0
+    assert requests[0].cfg_scale_speaker == 5.0
 
 
 @pytest.mark.parametrize("fields", [
@@ -136,6 +136,115 @@ def test_split_shares_reference_caption_and_generated_seed(endpoint):
     assert requests[0].ref_wavs == requests[1].ref_wavs
     assert all(request.caption == "明るい声" for request in requests)
     assert sf.info(response.json()["candidates"][0]["path"]).frames == 480 * 2 + 7200
+
+
+@pytest.mark.parametrize("caption", ["", "落ち着いた女性が穏やかに話す"])
+@pytest.mark.parametrize("seed", [None, 0, 677])
+@pytest.mark.parametrize("speaker_scale", [0.0, 2.5])
+def test_split_without_reference_reuses_first_audio(endpoint, caption, seed, speaker_scale):
+    client, requests, runtime = endpoint
+    original = runtime.synthesize
+    reference_paths = []
+
+    def generate(request, **kwargs):
+        if requests:
+            assert not request.no_ref
+            path = Path(request.ref_wavs[0])
+            reference_paths.append(path)
+            reference, sample_rate = sf.read(path)
+            assert sample_rate == 48000
+            assert reference.shape == (480,)
+            assert reference == pytest.approx(0.1, abs=1e-4)
+        result = original(request, **kwargs)
+        result.audio.mul_(len(requests))
+        return result
+
+    runtime.synthesize = generate
+    data = {
+        "text": "こんにちは。今日は晴れています。散歩に出かけましょう。",
+        "caption": caption, "auto_split": "true", "cfg_scale_speaker": str(speaker_scale),
+    }
+    if seed is not None:
+        data["seed"] = str(seed)
+    response = client.post("/api/v1/synthesize", data=data)
+    assert response.status_code == 200, response.text
+    assert len(requests) == 3
+    assert requests[0].no_ref and requests[0].ref_wavs is None
+    assert len(reference_paths) == 2 and reference_paths[0] == reference_paths[1]
+    assert not reference_paths[0].parent.exists()
+    assert all(request.caption == (caption or None) for request in requests)
+    assert all(request.cfg_scale_speaker == speaker_scale for request in requests[1:])
+    used_seed = 677 if seed is None else seed
+    assert [request.seed for request in requests] == [seed, used_seed, used_seed]
+    assert response.json()["used_seed"] == used_seed
+    audio, _ = sf.read(response.json()["candidates"][0]["path"])
+    assert len(audio) == 480 * 3 + 7200 * 2
+    assert audio[:480] == pytest.approx(0.1, abs=1e-4)
+    assert audio[7680:8160] == pytest.approx(0.2, abs=1e-4)
+    assert audio[-480:] == pytest.approx(0.3, abs=1e-4)
+
+
+@pytest.mark.parametrize("text, speaker_condition", [
+    ("こんにちは。", True),
+    ("こんにちは。今日は晴れています。", False),
+])
+def test_split_does_not_create_unneeded_reference(endpoint, monkeypatch, text, speaker_condition):
+    client, requests, runtime = endpoint
+    runtime.model_cfg.use_speaker_condition_resolved = speaker_condition
+    original = facade.save_wav
+    saved_paths = []
+
+    def save(path, *args):
+        saved_paths.append(Path(path))
+        return original(path, *args)
+
+    monkeypatch.setattr(facade, "save_wav", save)
+    response = client.post("/api/v1/synthesize", data={"text": text, "auto_split": "true"})
+    assert response.status_code == 200
+    assert all(request.no_ref and request.ref_wavs is None for request in requests)
+    assert saved_paths == [Path(response.json()["candidates"][0]["path"])]
+
+
+@pytest.mark.parametrize("reference", [
+    {"ref_wavs": ["external.wav"]},
+    {"ref_embed": "external.speaker.safetensors"},
+    {"ref_latents": ["external.pt"]},
+])
+def test_split_preserves_explicit_speaker_condition(endpoint, monkeypatch, reference):
+    _, requests, runtime = endpoint
+    monkeypatch.setattr(facade, "save_wav", lambda *args: pytest.fail("generated reference saved"))
+    facade.run_split_synthesis(
+        chunks=["こんにちは。", "お元気ですか。"],
+        build_request=lambda text, seed: SamplingRequest(text=text, seed=seed, **reference),
+        initial_seed=0, runtime=runtime, log_fn=lambda message: None, silence_ms=0,
+    )
+    assert len(requests) == 2
+    assert all(not request.no_ref for request in requests)
+    for name, value in reference.items():
+        assert all(getattr(request, name) == value for request in requests)
+
+
+def test_split_removes_generated_reference_after_inference_failure(endpoint):
+    client, requests, runtime = endpoint
+    original = runtime.synthesize
+    reference_paths = []
+
+    def generate(request, **kwargs):
+        if requests:
+            path = Path(request.ref_wavs[0])
+            assert path.is_file()
+            reference_paths.append(path)
+            raise torch.cuda.OutOfMemoryError("test OOM after first chunk")
+        return original(request, **kwargs)
+
+    runtime.synthesize = generate
+    response = client.post("/api/v1/synthesize", data={
+        "text": "こんにちは。お元気ですか。", "auto_split": "true",
+    })
+    assert response.status_code == 507, response.text
+    assert len(reference_paths) == 1 and not reference_paths[0].parent.exists()
+    runtime.synthesize = original
+    assert client.post("/api/v1/synthesize", data={"text": "こんにちは。"}).status_code == 200
 
 
 def test_oom_preserves_error_contract_and_can_retry(endpoint):

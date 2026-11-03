@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 import uuid
-from dataclasses import dataclass
+from contextlib import ExitStack
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Callable
 
 import torch
@@ -129,7 +131,8 @@ def run_split_synthesis(  # 公開: gradio_app からも再利用するため
 ) -> SamplingResult:
     """chunk 列を順次合成し、無音を挟んで連結した SamplingResult を返す。
 
-    - 全 chunk で同一 seed を使う(声質の一貫性)。
+    - 全 chunk で同一 seed を使う(再現性)。
+    - 参照なしの複数 chunk は最初の音声を固定参照にして話者性を保つ。
     - 各 chunk は num_candidates=1 (build_request 側で保証する想定)。
     - stage_timings は chunk_i/<stage_name> プレフィクスで集約。
     """
@@ -141,20 +144,38 @@ def run_split_synthesis(  # 公開: gradio_app からも再利用するため
     used_seed = 0
     sample_rate = 0
 
-    for i, chunk_text in enumerate(chunks, start=1):
-        log_fn(f"[split] chunk {i}/{len(chunks)} ({len(chunk_text)} chars)")
-        result = runtime.synthesize(build_request(chunk_text, seed_for_call), log_fn=log_fn)
-        if not result.audios:
-            raise RuntimeError(f"chunk {i} produced no audio.")
-        audios.append(result.audios[0])
-        timings.extend((f"chunk_{i}/{name}", sec) for name, sec in result.stage_timings)
-        messages.extend(f"chunk_{i}: {m}" for m in result.messages)
-        total_decode += result.total_to_decode
-        if seed_for_call is None:
-            # 後続 chunk に同じ seed を使い回す。
-            seed_for_call = result.used_seed
-        used_seed = result.used_seed
-        sample_rate = result.sample_rate
+    generated_reference = None
+    with ExitStack() as cleanup:
+        for i, chunk_text in enumerate(chunks, start=1):
+            log_fn(f"[split] chunk {i}/{len(chunks)} ({len(chunk_text)} chars)")
+            request = build_request(chunk_text, seed_for_call)
+            if generated_reference is not None:
+                request = replace(request, no_ref=False, ref_wavs=[str(generated_reference)])
+            result = runtime.synthesize(request, log_fn=log_fn)
+            if not result.audios:
+                raise RuntimeError(f"chunk {i} produced no audio.")
+            audios.append(result.audios[0])
+            timings.extend((f"chunk_{i}/{name}", sec) for name, sec in result.stage_timings)
+            messages.extend(f"chunk_{i}: {m}" for m in result.messages)
+            total_decode += result.total_to_decode
+            if seed_for_call is None:
+                seed_for_call = result.used_seed
+            used_seed = result.used_seed
+            sample_rate = result.sample_rate
+
+            if (
+                i == 1
+                and len(chunks) > 1
+                and request.no_ref
+                and runtime.model_cfg.use_speaker_condition_resolved
+            ):
+                reference_dir = cleanup.enter_context(TemporaryDirectory(prefix="irodori-split-"))
+                generated_reference = save_wav(
+                    Path(reference_dir) / "first_chunk.wav", result.audios[0].float(), sample_rate,
+                )
+                message = "using first chunk as fixed speaker reference for remaining chunks"
+                messages.append(message)
+                log_fn(f"[split] {message}")
 
     concatenated = _concat_chunks(audios, sample_rate, silence_ms)
     messages.insert(0, f"split into {len(chunks)} chunks (silence={silence_ms}ms)")
@@ -256,7 +277,7 @@ def synthesize(
                 cfg_guidance_mode="independent",
                 cfg_scale_text=float(params.cfg_scale_text),
                 cfg_scale_caption=float(params.cfg_scale_caption),
-                cfg_scale_speaker=0.0 if effective_no_ref else float(params.cfg_scale_speaker),
+                cfg_scale_speaker=float(params.cfg_scale_speaker),
                 cfg_scale=None,
                 cfg_min_t=0.5,
                 cfg_max_t=1.0,
