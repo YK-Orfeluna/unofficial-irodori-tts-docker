@@ -42,8 +42,8 @@ def endpoint(tmp_path, monkeypatch):
     monkeypatch.setattr(facade, "load_runtime", lambda key: (runtime, False))
     app = FastAPI()
     api.attach_api(
-        app, default_checkpoint="test-checkpoint", default_model_device="cpu",
-        default_model_precision="fp32", default_codec_device="cpu", default_codec_precision="fp32",
+        app, default_checkpoint="test-checkpoint", default_model_device="cuda",
+        default_model_precision="fp32", default_codec_device="cuda", default_codec_precision="fp32",
     )
     with TestClient(app) as client:
         yield client, requests, runtime

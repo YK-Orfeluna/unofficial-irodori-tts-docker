@@ -31,19 +31,19 @@ def test_launcher_paths_do_not_depend_on_working_directory(project, tmp_path, mo
     launcher.configure_runtime()
     assert os.environ["IRODORI_REFERENCE_AUDIO_DIR"] == str(project / "reference_audio")
     assert os.environ["IRODORI_API_OUTPUT_DIR"] == str(project / "api_outputs" / "irodori-tts")
-    assert os.environ["IRODORI_CODEC_DEVICE"] == "cpu"
-    assert os.environ["IRODORI_CODEC_PRECISION"] == "fp32"
+    assert "IRODORI_CODEC_DEVICE" not in os.environ
+    assert "IRODORI_CODEC_PRECISION" not in os.environ
 
 
 def test_launcher_keeps_explicit_configuration(project, monkeypatch):
     monkeypatch.setenv("IRODORI_API_OUTPUT_DIR", str(project / "custom"))
-    monkeypatch.setenv("IRODORI_CODEC_DEVICE", "cuda")
+    monkeypatch.setenv("IRODORI_CODEC_PRECISION", "fp32")
     monkeypatch.setattr(launcher.shutil, "which", lambda name: str(project / "ffmpeg.exe"))
     if os.name == "nt":
         monkeypatch.setattr(launcher.os, "add_dll_directory", lambda path: object())
     launcher.configure_runtime()
     assert os.environ["IRODORI_API_OUTPUT_DIR"] == str(project / "custom")
-    assert os.environ["IRODORI_CODEC_DEVICE"] == "cuda"
+    assert os.environ["IRODORI_CODEC_PRECISION"] == "fp32"
 
 
 def test_windows_registers_local_ffmpeg_dll_directory(project, monkeypatch):

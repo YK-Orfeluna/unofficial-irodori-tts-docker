@@ -11,8 +11,6 @@ _DLL_HANDLES: list[object] = []
 def configure_runtime() -> None:
     os.environ.setdefault("IRODORI_REFERENCE_AUDIO_DIR", str(PROJECT_ROOT / "reference_audio"))
     os.environ.setdefault("IRODORI_API_OUTPUT_DIR", str(PROJECT_ROOT / "api_outputs" / "irodori-tts"))
-    os.environ.setdefault("IRODORI_CODEC_DEVICE", "cpu")
-    os.environ.setdefault("IRODORI_CODEC_PRECISION", "fp32")
 
     local_bin = PROJECT_ROOT / "tools" / "ffmpeg" / "bin"
     if local_bin.is_dir():

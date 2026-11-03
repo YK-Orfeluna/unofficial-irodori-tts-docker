@@ -140,6 +140,8 @@ def build_runtime_key(
     log_prefix: str,
     reject_speaker_inversion: bool = False,
 ) -> RuntimeKey:
+    if torch.device(model_device).type != "cuda" or torch.device(codec_device).type != "cuda":
+        raise ValueError("Both model_device and codec_device must use CUDA.")
     if model_precision not in runtime_precision_choices(model_device):
         raise ValueError(f"Unsupported model precision {model_precision!r} on {model_device}.")
     if codec_precision not in runtime_precision_choices(codec_device):

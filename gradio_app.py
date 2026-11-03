@@ -2,18 +2,18 @@
 from __future__ import annotations
 
 import argparse
-import os
+import threading
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 
 import gradio as gr
+import uvicorn
 
 from irodori_tts.gradio_emoji_palette import EMOJI_PALETTE_CSS, build_emoji_palette
 from irodori_tts.inference_runtime import (
     RuntimeKey,
     SamplingRequest,
-    default_runtime_device,
-    list_available_runtime_devices,
     save_wav,
 )
 from irodori_tts.speaker_inversion import is_speaker_inversion_safetensors_path
@@ -83,25 +83,15 @@ def _default_checkpoint() -> str:
 
 
 def _default_model_device() -> str:
-    return default_runtime_device()
+    return "cuda"
 
 
 def _default_codec_device() -> str:
-    return os.environ.get("IRODORI_CODEC_DEVICE", "cpu")
+    return "cuda"
 
 
 def _precision_choices_for_device(device: str) -> list[str]:
     return runtime_precision_choices(device)
-
-
-def _on_model_device_change(device: str) -> gr.Dropdown:
-    choices = _precision_choices_for_device(device)
-    return gr.Dropdown(choices=choices, value=choices[0])
-
-
-def _on_codec_device_change(device: str) -> gr.Dropdown:
-    choices = _precision_choices_for_device(device)
-    return gr.Dropdown(choices=choices, value=choices[0])
 
 
 def _on_t_schedule_mode_change(mode: str) -> object:
@@ -454,7 +444,7 @@ def build_ui() -> gr.Blocks:
     default_checkpoint = _default_checkpoint()
     default_model_device = _default_model_device()
     default_codec_device = _default_codec_device()
-    device_choices = list_available_runtime_devices()
+    device_choices = ["cuda"]
     model_precision_choices = _precision_choices_for_device(default_model_device)
     codec_precision_choices = _precision_choices_for_device(default_codec_device)
     default_model_precision = resolve_precision_from_env(
@@ -471,7 +461,8 @@ def build_ui() -> gr.Blocks:
         gr.Markdown(
             "v4.1-Small is the default; other checkpoints and quantized variants can be selected. "
             "INT4 requires CC 8.0+, FP8 requires CC 8.9+. "
-            "BF16 is preferred on supported GPUs; other devices use FP32."
+            "Model and codec run on CUDA. BF16 is preferred on supported GPUs; "
+            "other GPUs use FP32."
         )
 
         with gr.Row():
@@ -486,6 +477,7 @@ def build_ui() -> gr.Blocks:
                 label="Model Device",
                 choices=device_choices,
                 value=default_model_device,
+                interactive=False,
                 scale=1,
             )
             model_precision = gr.Dropdown(
@@ -498,6 +490,7 @@ def build_ui() -> gr.Blocks:
                 label="Codec Device",
                 choices=device_choices,
                 value=default_codec_device,
+                interactive=False,
                 scale=1,
             )
             codec_precision = gr.Dropdown(
@@ -708,12 +701,6 @@ def build_ui() -> gr.Blocks:
             ],
             outputs=[*out_audios, out_log, out_timing],
         )
-        model_device.change(
-            _on_model_device_change, inputs=[model_device], outputs=[model_precision]
-        )
-        codec_device.change(
-            _on_codec_device_change, inputs=[codec_device], outputs=[codec_precision]
-        )
         t_schedule_mode.change(
             _on_t_schedule_mode_change, inputs=[t_schedule_mode], outputs=[sway_coeff]
         )
@@ -734,16 +721,23 @@ def build_ui() -> gr.Blocks:
     return demo
 
 
+def _open_browser_when_ready(url: str, server: uvicorn.Server, stopped: threading.Event) -> None:
+    while not stopped.wait(0.2):
+        if server.started:
+            webbrowser.open(url)
+            return
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Gradio + REST API app for Irodori-TTS.")
     parser.add_argument("--server-name", default="127.0.0.1")
     parser.add_argument("--server-port", type=int, default=7860)
     parser.add_argument("--share", action="store_true", help="ignored (kept for CLI compatibility)")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--open-browser", action="store_true", help="Open the UI after startup.")
     args = parser.parse_args()
 
     import gradio as gr_mount  # ローカル import: mount_gradio_app は import 時刻に副作用が出る場合があるため
-    import uvicorn
     from fastapi import FastAPI
 
     from irodori_tts_api.app import attach_api
@@ -777,12 +771,24 @@ def main() -> None:
     )
     app = gr_mount.mount_gradio_app(app, demo, path="/", css=EMOJI_PALETTE_CSS)
 
-    uvicorn.run(
-        app,
-        host=args.server_name,
-        port=args.server_port,
+    server = uvicorn.Server(uvicorn.Config(
+        app, host=args.server_name, port=args.server_port,
         log_level="debug" if args.debug else "info",
-    )
+    ))
+    stopped = threading.Event()
+    if args.open_browser:
+        host = "127.0.0.1" if args.server_name in {"0.0.0.0", "::"} else args.server_name
+        host = f"[{host}]" if ":" in host else host
+        threading.Thread(
+            target=_open_browser_when_ready,
+            args=(f"http://{host}:{args.server_port}", server, stopped), daemon=True,
+        ).start()
+    try:
+        server.run()
+        if not server.started:
+            raise SystemExit(3)
+    finally:
+        stopped.set()
 
 
 if __name__ == "__main__":

@@ -8,94 +8,64 @@
 
 ### Windows（コンテナ・管理者権限不要）
 
-64bit版Windows、Git、RTX 2080以降のNVIDIA GPUとCUDA 12.8に対応する導入済みドライバが必要です。GPU型番・VRAM容量は固定しません。以下は通常権限のPowerShellで実行します。Python 3.11と依存パッケージはuvで管理し、CUDA Toolkitの別途インストールは不要です。
+64bit版Windows、RTX 2080以降のNVIDIA GPUとCUDA 12.8に対応する導入済みドライバが必要です。GPU型番・VRAM容量は固定しません。
 
-**1. uvをインストールする（初回のみ）**
+**初回の準備**
 
-通常のPowerShellで以下を実行します。既にuvが使える場合は省略できます。
+1. GitHubの **Code → Download ZIP** からダウンロードし、デスクトップなど自分が書き込めるフォルダへ展開します。
+2. 展開したフォルダの **`setup.cmd` をダブルクリック**します。
+3. 「セットアップが完了しました」と表示されたら、キーを押して画面を閉じます。
 
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+必要なuv・Git・Python・FFmpeg・パッケージを自動で準備します。管理者として実行する必要はありません。変数・PATHの設定や、PowerShellへのコマンド入力も不要です。初回は数GBのダウンロードがあるため、完了まで時間がかかります。
+
+**普段の起動・終了**
+
+1. **`start.cmd` をダブルクリック**します。
+2. モデルの読み込みが終わると、ブラウザにUIが開きます。
+3. 終了するときは、起動時に開いた黒い画面で **`Ctrl+C`** を押します。終了確認が表示されたら **`Y`** を押してください。
+
+初回起動ではモデルもダウンロードします。準備中は黒い画面を閉じずにお待ちください。ブラウザを閉じるだけではアプリは終了しません。
+
+コマンドプロンプトから実行する場合は、フォルダを開いて初回に以下を実行します。
+
+```bat
+setup.cmd
 ```
 
-完了したら、ターミナルを開き直して次へ進んでください。ユーザ領域にインストールされるため、管理者権限は不要です。実行ポリシーの指定はこのコマンドのプロセスだけに適用されます。[uv公式のインストール手順](https://docs.astral.sh/uv/getting-started/installation/)
+セットアップ完了後、普段の起動には以下だけを実行します。
 
-**2. リポジトリと依存パッケージを取得する**
-
-ユーザが書き込めるフォルダで実行してください。サブモジュールを含めた取得が必要です。
-
-```powershell
-git clone --recurse-submodules https://github.com/YK-Orfeluna/unofficial-irodori-tts-docker.git
-cd unofficial-irodori-tts-docker
-uv sync --locked
+```bat
+start.cmd
 ```
+
+セットアップが失敗した場合は、画面に出たエラーを確認してから `setup.cmd` を再実行してください。取得済みのツールは再利用します。起動時にポートが使用中と表示された場合は、先に起動した本アプリを終了してください。
+
+モデルとコーデックは常にGPU（CUDA）で動作します。精度は両方とも、対応GPUではBF16、非対応GPU（RTX 2080など）ではFP32を自動選択します。CUDAが利用できない場合やVRAM不足時はエラーになり、CPUには切り替えません。UIで生成したWAVはフォルダ内の `gradio_outputs/` に保存されます。
 
 <details>
-<summary>既にリポジトリを取得している場合</summary>
+<summary>開発者・API利用者向けの情報</summary>
 
-プロジェクトのルートで以下を実行します。
+セットアップはuv 0.11.17、Python 3.11、CUDA 12.8版PyTorch、FFmpeg 7.1 shared版を使用します。uv・Git・FFmpegは `tools/`、仮想環境は `.venv/` に配置し、Python本体とモデルはユーザ領域のキャッシュに保存します。システムのPATHや実行ポリシーは変更しません。内部のPowerShell処理はCMDから自動で呼び出します。
 
-```powershell
-git submodule update --init --recursive
-uv sync --locked
-```
+ZIP版に含まれない上流コードは固定リビジョンを取得します。Gitチェックアウトでは、サブモジュールを初期化します。上流を更新する場合は、`scripts/windows_setup.py` の `UPSTREAM_REVISION` もサブモジュールのリビジョンに合わせてください。
 
-</details>
+セットアップ後はPythonから直接起動できます。ブラウザを自動で開く場合は `--open-browser`、ポートを変更する場合は `--server-port 7862` を指定してください。`start.cmd` にも同じ引数を渡せます。
 
-**3. FFmpegのshared版を配置する**
-
-初回のみ、下の「FFmpegの配置コマンド」を開き、まとめてコピーしてプロジェクトのルートで実行してください。PATH上にFFmpegのshared版が導入済みの場合は省略できます。
-
-<details>
-<summary>FFmpegの配置コマンド（初回のみ）</summary>
-
-以下は動作確認済みのFFmpeg 7.1 shared版をプロジェクト内へ配置するコマンドです。システムのFFmpegやPATH設定は変更しません。
-
-```powershell
-$ffmpegZip = Join-Path $env:TEMP 'irodori-ffmpeg7.zip'
-Invoke-WebRequest 'https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-31-14-10/ffmpeg-n7.1.5-12-g1fdbca85aa-win64-lgpl-shared-7.1.zip' -OutFile $ffmpegZip
-Expand-Archive $ffmpegZip -DestinationPath '.\tools\ffmpeg-extract' -Force
-$extracted = Get-ChildItem '.\tools\ffmpeg-extract' -Directory | Select-Object -First 1
-New-Item -ItemType Directory -Force '.\tools\ffmpeg' | Out-Null
-Copy-Item (Join-Path $extracted.FullName '*') '.\tools\ffmpeg' -Recurse -Force
-```
-
-`tools/ffmpeg/bin/` に `ffmpeg.exe`、`ffprobe.exe`、`avcodec-61.dll` などが配置されます。TorchCodecには共有DLLが必要なため、`ffmpeg.exe` だけを含むstatic版では起動できません。
-
-</details>
-
-**4. UI・APIを起動する**
-
-```powershell
-uv run --locked python main.py
+```bat
+.venv\Scripts\python.exe main.py
 ```
 
 - UI: `http://127.0.0.1:7860/`
 - APIドキュメント: `http://127.0.0.1:7860/api/docs`
 - health: `http://127.0.0.1:7860/api/v1/health`
 
-初回起動時はモデルをダウンロード・読み込みしてから受付を開始します。モデルは通常のHugging Faceキャッシュに保存されます。保存先を変更する場合は、起動前に `$env:HF_HOME = 'D:\models\huggingface'` のように指定してください。終了は `Ctrl+C` です。
+API用の参照音声は `reference_audio/` に置き、`ref_wav_path` には `sample.wav` のような相対パスを指定できます。APIの生成WAVは `api_outputs/irodori-tts/` に保存します。
 
-依存導入後は仮想環境のPythonからも直接起動できます。activateやPowerShellの実行ポリシー変更は不要です。ポートが使用中の場合は `--server-port 7862` などを末尾に付けてください。
+モデルキャッシュは `HF_HOME`、精度は `IRODORI_MODEL_PRECISION`／`IRODORI_CODEC_PRECISION`、APIの参照・保存ディレクトリは `IRODORI_REFERENCE_AUDIO_DIR`／`IRODORI_API_OUTPUT_DIR` で変更できます。明示的な精度設定は自動選択より優先され、非対応の指定はエラーになります。実行デバイスはCUDA固定で、`IRODORI_CODEC_DEVICE` による変更は受け付けません。重みファイルの初期読み込みはCPUメモリを経由してからGPUへ転送します。
 
-```powershell
-.\.venv\Scripts\python.exe main.py
-```
+Windows実機での音声生成はRTX 2080／FP32で確認しています。BF16選択の分岐は単体テストで確認しています。
 
-Windows起動時の既定は、モデルがCUDA／BF16、コーデックがCPU／FP32です。BF16非対応GPU（RTX 2080など）ではモデルをFP32に切り替え、理由を起動ログに表示します。FP32ではVRAM使用量が増えるため、使用モデル・入力長がGPUに収まる範囲で利用してください。明示的な設定は自動選択より優先され、非対応の精度指定はエラーになります。
-
-```powershell
-$env:IRODORI_MODEL_PRECISION = 'fp32'
-uv run --locked python main.py
-```
-
-API用の参照音声はプロジェクト内の `reference_audio/` に置き、`ref_wav_path` には `sample.wav` のような相対パスを指定できます。APIの生成WAVは `api_outputs/irodori-tts/`、UIの生成WAVは `gradio_outputs/` に保存します。APIのディレクトリは `IRODORI_REFERENCE_AUDIO_DIR`／`IRODORI_API_OUTPUT_DIR` で変更できます。
-
-Windows実機では日本語・空白を含むパスで全58テスト、UI・API起動、caption／参照音声指定による48kHz WAV生成と取得、正常終了を確認済みです。実機確認はRTX 2080／FP32で行い、BF16選択の分岐は単体テストで確認しています。テストはプロジェクトのルートから以下で実行できます。
-
-```powershell
-uv run --locked python -m pytest -q
-```
+</details>
 
 ### Docker
 
@@ -153,7 +123,7 @@ UIのCheckpointで通常モデル・量子化モデル・ローカルcheckpoint�
 | [v4.1-Small-MF](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-MF) | 約773Mパラメータ。v4.1-SmallをMeanFlowで蒸留した少ステップ生成版。条件エンコーダ・音声長予測器を固定し、DiTを学習。量子化とは別の変更 | MeanFlow 4 | 2.88 GiB | 1.44 GiB | MIT |
 | [v4-Large](https://huggingface.co/Aratako/Irodori-TTS-v4-Large) | 約3.29Bパラメータ。DiTと参照エンコーダを拡大し、共通エンコーダをT5Gemma 2へ変更。音声長予測器は本体の学習後に別途学習 | RF 40 | 12.25 GiB | 6.12 GiB | Gemma Terms of Use |
 
-重み用VRAMは、各公式リポジトリのsafetensorsパラメータ集計値に、FP32は4バイト、BF16は2バイトを掛けた概算です（1 GiB = 2³⁰バイト、2026-10-11確認）。**推論全体のVRAM消費量やピークの実測値ではありません。** 中間値、Attentionの計算用メモリ、CUDAの管理領域などが別途必要で、入力テキスト・参照音声・生成音声が長いほど増える場合があります。コーデックをGPUで動かす場合は、その重みと計算用メモリも必要です。本環境の既定ではコーデックをCPUで動かします。MFはステップ数を減らしますが、重みのVRAMは通常Smallとほぼ同じです。
+重み用VRAMは、各公式リポジトリのsafetensorsパラメータ集計値に、FP32は4バイト、BF16は2バイトを掛けた概算です（1 GiB = 2³⁰バイト、2026-10-11確認）。**推論全体のVRAM消費量やピークの実測値ではありません。** 中間値、Attentionの計算用メモリ、CUDAの管理領域などが別途必要で、入力テキスト・参照音声・生成音声が長いほど増える場合があります。本環境ではコーデックもGPUで動かすため、その重みと計算用メモリも必要です。MFはステップ数を減らしますが、重みのVRAMは通常Smallとほぼ同じです。
 
 ステップ既定はUIのNum Stepsを空欄、APIのnum_stepsを未指定にした場合です。RFはRectified Flow、MFはMeanFlowを指します。
 
@@ -167,7 +137,7 @@ CERは文字誤り率で、低いほど良い指標です。上記のJSUT値はF
 
 ### 精度・量子化と本環境
 
-Windows起動ではBF16対応GPUでモデルCUDA/BF16を優先し、非対応GPUではCUDA/FP32を使います。Docker Composeの既定はRTX 2080（VRAM 8GB）向けのモデルCUDA/FP32です。コーデックはどちらもCPU/FP32です。環境変数 `IRODORI_MODEL_PRECISION`、`IRODORI_CODEC_DEVICE`、`IRODORI_CODEC_PRECISION` で変更でき、DockerではComposeのenvironmentで設定します。UIでもデバイス・精度を選択可能です。BF16非対応GPUではBF16を選択肢から除外します。
+Windows・Docker共通で、モデルとコーデックの実行先はCUDA固定です。両方ともBF16対応GPUではBF16を優先し、非対応GPUではFP32を使います。精度はUIまたは環境変数 `IRODORI_MODEL_PRECISION`／`IRODORI_CODEC_PRECISION` で変更でき、DockerではComposeのenvironmentに追加して指定します。BF16非対応GPUではBF16を選択肢から除外します。CUDAが利用できない場合やVRAM不足時も、CPUへの自動切り替えは行いません。
 
 公式の量子化版は、[v4-Small-Quantized](https://huggingface.co/Aratako/Irodori-TTS-v4-Small-Quantized)、[v4.1-Small-Quantized](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-Quantized)、[v4-Large-Quantized](https://huggingface.co/Aratako/Irodori-TTS-v4-Large-Quantized)です。それぞれ元モデルを学習後にtorchaoで量子化した版で、元モデルの条件入力・生成方式を引き継ぎます。MFの少ステップ化と、量子化によるメモリ削減は別の仕組みです。
 

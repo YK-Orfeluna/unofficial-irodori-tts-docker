@@ -5,11 +5,6 @@ services:
     container_name: Irodori-TTS
     restart: unless-stopped
     command: ["gradio_app.py", "--server-name", "0.0.0.0", "--server-port", "7860"]
-    environment:
-      IRODORI_MODEL_PRECISION: "fp32"
-      # RTX 2080 の8GB VRAMを合成モデルに割り当てるため。
-      IRODORI_CODEC_DEVICE: "cpu"
-      IRODORI_CODEC_PRECISION: "fp32"
     ports:
       - "7860:7860"
     volumes:
