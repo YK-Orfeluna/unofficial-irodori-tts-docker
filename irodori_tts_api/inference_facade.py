@@ -19,7 +19,7 @@ from .runtime_helpers import RUNTIME_LOCK, build_runtime_key, load_runtime
 from .text_splitter import split_text_for_tts
 
 _OUTPUT_DIR_ENV = "IRODORI_API_OUTPUT_DIR"
-_DEFAULT_OUTPUT_DIR = Path("/app/api_outputs")
+_DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent.parent / "api_outputs"
 MAX_CANDIDATES = 32
 
 
@@ -33,7 +33,7 @@ def get_output_dir() -> Path:
 @dataclass
 class CandidateOutput:
     index: int
-    path: str  # コンテナ内絶対パス
+    path: str
     url: str  # /files/<basename> 形式の相対URL
 
 

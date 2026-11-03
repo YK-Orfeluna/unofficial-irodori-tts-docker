@@ -1,0 +1,31 @@
+[project]
+name = "irodori-tts-ui"
+version = "0.1.0"
+requires-python = "==3.11.*"
+dependencies = [
+    "irodori-tts",
+    "fastapi>=0.115",
+    "python-multipart>=0.0.18",
+    "uvicorn>=0.34",
+    "torch>=2.10,<2.11",
+    "torchaudio>=2.10,<2.11",
+    "torchao>=0.16,<0.17",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "httpx>=0.28"]
+
+[tool.uv.sources]
+irodori-tts = { path = "Irodori-TTS", editable = true }
+dacvae = { git = "https://github.com/facebookresearch/dacvae", rev = "414c20785fc3a28373073ea8ef7a1316eeeaca6e" }
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

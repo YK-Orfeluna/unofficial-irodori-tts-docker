@@ -58,14 +58,15 @@ HF_CHECKPOINT_CHOICES = [
 
 
 def _local_checkpoint_candidates() -> list[str]:
+    root = Path(__file__).resolve().parent
     return [
         str(p)
         for p in sorted(
             [
-                *Path(".").glob("**/checkpoint_*.pt"),
+                *root.glob("**/checkpoint_*.pt"),
                 *(
                     path
-                    for path in Path(".").glob("**/checkpoint_*.safetensors")
+                    for path in root.glob("**/checkpoint_*.safetensors")
                     if not is_speaker_inversion_safetensors_path(path)
                 ),
             ]
@@ -410,7 +411,7 @@ def _run_generation(
             sanitized_text = str(text).replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
             result = runtime.synthesize(build_request(sanitized_text, seed), log_fn=stdout_log)
 
-        out_dir = Path("gradio_outputs")
+        out_dir = Path(__file__).resolve().parent / "gradio_outputs"
         out_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         out_paths: list[str] = []
@@ -456,13 +457,21 @@ def build_ui() -> gr.Blocks:
     device_choices = list_available_runtime_devices()
     model_precision_choices = _precision_choices_for_device(default_model_device)
     codec_precision_choices = _precision_choices_for_device(default_codec_device)
+    default_model_precision = resolve_precision_from_env(
+        "IRODORI_MODEL_PRECISION", device=default_model_device,
+        fallback=model_precision_choices[0], log_prefix="ui",
+    )
+    default_codec_precision = resolve_precision_from_env(
+        "IRODORI_CODEC_PRECISION", device=default_codec_device,
+        fallback=codec_precision_choices[0], log_prefix="ui",
+    )
 
     with gr.Blocks(title="Irodori-TTS Gradio") as demo:
         gr.Markdown("# Irodori-TTS — Voice Cloning / VoiceDesign")
         gr.Markdown(
             "v4.1-Small is the default; other checkpoints and quantized variants can be selected. "
-            "INT4 requires CC 8.0+, FP8 requires CC 8.9+. RTX 2080 uses FP32; "
-            "INT8 support is experimental on this GPU."
+            "INT4 requires CC 8.0+, FP8 requires CC 8.9+. "
+            "BF16 is preferred on supported GPUs; other devices use FP32."
         )
 
         with gr.Row():
@@ -482,7 +491,7 @@ def build_ui() -> gr.Blocks:
             model_precision = gr.Dropdown(
                 label="Model Precision",
                 choices=model_precision_choices,
-                value=model_precision_choices[0],
+                value=default_model_precision,
                 scale=1,
             )
             codec_device = gr.Dropdown(
@@ -494,7 +503,7 @@ def build_ui() -> gr.Blocks:
             codec_precision = gr.Dropdown(
                 label="Codec Precision",
                 choices=codec_precision_choices,
-                value=codec_precision_choices[0],
+                value=default_codec_precision,
                 scale=1,
             )
 

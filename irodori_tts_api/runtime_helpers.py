@@ -52,7 +52,7 @@ def runtime_precision_choices(device: str) -> list[str]:
     choices = list_available_runtime_precisions(device)
     if torch.device(device).type == "cuda" and torch.cuda.get_device_capability(device) < (8, 0):
         return [value for value in choices if value != "bf16"]
-    return choices
+    return sorted(choices, key=lambda value: value != "bf16")
 
 
 def _validate_quantization(quantization_type: str, device: str) -> None:
@@ -84,9 +84,10 @@ def resolve_precision_from_env(
     """
     raw = os.environ.get(env_var_name)
     if raw is None or raw.strip() == "":
+        reason = "BF16 preferred" if fallback == "bf16" else "BF16 unavailable; FP32 uses more memory"
         print(
             f"[{log_prefix}] {env_var_name} not set; using fallback={fallback!r} "
-            f"(device={device!r})",
+            f"(device={device!r}; {reason})",
             flush=True,
         )
         return fallback

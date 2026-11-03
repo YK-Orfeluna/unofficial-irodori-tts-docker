@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 import soundfile as sf
@@ -82,7 +83,7 @@ def test_multiple_references_preserve_order(endpoint):
         ("caption", (None, "落ち着いた声")),
     ])
     assert response.status_code == 200
-    assert [path.rsplit("/", 1)[-1] for path in requests[0].ref_wavs] == ["second.wav", "first.wav"]
+    assert [Path(path).name for path in requests[0].ref_wavs] == ["second.wav", "first.wav"]
     assert requests[0].caption == "落ち着いた声"
     assert requests[0].num_steps is None
 

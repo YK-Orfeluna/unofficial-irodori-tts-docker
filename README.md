@@ -1,10 +1,103 @@
 # unofficial-irodori-tts-docker
 
-[Irodori-TTS](https://github.com/Aratako/Irodori-TTS) v4/v4.1 をDockerで動かす非公式ラッパーです。既定モデルは `Aratako/Irodori-TTS-v4.1-Small`。参照音声によるVoice CloningとcaptionによるVoiceDesignを、1つのGradio UI / REST APIに統合しています。
+[Irodori-TTS](https://github.com/Aratako/Irodori-TTS) v4/v4.1 をWindowsまたはDockerで動かす非公式ラッパーです。既定モデルは `Aratako/Irodori-TTS-v4.1-Small`。参照音声によるVoice CloningとcaptionによるVoiceDesignを、1つのGradio UI / REST APIに統合しています。
 
 元リポジトリの作者とは無関係で、公式サポートは提供しません。
 
 ## セットアップ
+
+### Windows（コンテナ・管理者権限不要）
+
+64bit版Windows、Git、RTX 2080以降のNVIDIA GPUとCUDA 12.8に対応する導入済みドライバが必要です。GPU型番・VRAM容量は固定しません。以下は通常権限のPowerShellで実行します。Python 3.11と依存パッケージはuvで管理し、CUDA Toolkitの別途インストールは不要です。
+
+**1. uvをインストールする（初回のみ）**
+
+通常のPowerShellで以下を実行します。既にuvが使える場合は省略できます。
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+完了したら、ターミナルを開き直して次へ進んでください。ユーザ領域にインストールされるため、管理者権限は不要です。実行ポリシーの指定はこのコマンドのプロセスだけに適用されます。[uv公式のインストール手順](https://docs.astral.sh/uv/getting-started/installation/)
+
+**2. リポジトリと依存パッケージを取得する**
+
+ユーザが書き込めるフォルダで実行してください。サブモジュールを含めた取得が必要です。
+
+```powershell
+git clone --recurse-submodules https://github.com/YK-Orfeluna/unofficial-irodori-tts-docker.git
+cd unofficial-irodori-tts-docker
+uv sync --locked
+```
+
+<details>
+<summary>既にリポジトリを取得している場合</summary>
+
+プロジェクトのルートで以下を実行します。
+
+```powershell
+git submodule update --init --recursive
+uv sync --locked
+```
+
+</details>
+
+**3. FFmpegのshared版を配置する**
+
+初回のみ、下の「FFmpegの配置コマンド」を開き、まとめてコピーしてプロジェクトのルートで実行してください。PATH上にFFmpegのshared版が導入済みの場合は省略できます。
+
+<details>
+<summary>FFmpegの配置コマンド（初回のみ）</summary>
+
+以下は動作確認済みのFFmpeg 7.1 shared版をプロジェクト内へ配置するコマンドです。システムのFFmpegやPATH設定は変更しません。
+
+```powershell
+$ffmpegZip = Join-Path $env:TEMP 'irodori-ffmpeg7.zip'
+Invoke-WebRequest 'https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-31-14-10/ffmpeg-n7.1.5-12-g1fdbca85aa-win64-lgpl-shared-7.1.zip' -OutFile $ffmpegZip
+Expand-Archive $ffmpegZip -DestinationPath '.\tools\ffmpeg-extract' -Force
+$extracted = Get-ChildItem '.\tools\ffmpeg-extract' -Directory | Select-Object -First 1
+New-Item -ItemType Directory -Force '.\tools\ffmpeg' | Out-Null
+Copy-Item (Join-Path $extracted.FullName '*') '.\tools\ffmpeg' -Recurse -Force
+```
+
+`tools/ffmpeg/bin/` に `ffmpeg.exe`、`ffprobe.exe`、`avcodec-61.dll` などが配置されます。TorchCodecには共有DLLが必要なため、`ffmpeg.exe` だけを含むstatic版では起動できません。
+
+</details>
+
+**4. UI・APIを起動する**
+
+```powershell
+uv run --locked python main.py
+```
+
+- UI: `http://127.0.0.1:7860/`
+- APIドキュメント: `http://127.0.0.1:7860/api/docs`
+- health: `http://127.0.0.1:7860/api/v1/health`
+
+初回起動時はモデルをダウンロード・読み込みしてから受付を開始します。モデルは通常のHugging Faceキャッシュに保存されます。保存先を変更する場合は、起動前に `$env:HF_HOME = 'D:\models\huggingface'` のように指定してください。終了は `Ctrl+C` です。
+
+依存導入後は仮想環境のPythonからも直接起動できます。activateやPowerShellの実行ポリシー変更は不要です。ポートが使用中の場合は `--server-port 7862` などを末尾に付けてください。
+
+```powershell
+.\.venv\Scripts\python.exe main.py
+```
+
+Windows起動時の既定は、モデルがCUDA／BF16、コーデックがCPU／FP32です。BF16非対応GPU（RTX 2080など）ではモデルをFP32に切り替え、理由を起動ログに表示します。FP32ではVRAM使用量が増えるため、使用モデル・入力長がGPUに収まる範囲で利用してください。明示的な設定は自動選択より優先され、非対応の精度指定はエラーになります。
+
+```powershell
+$env:IRODORI_MODEL_PRECISION = 'fp32'
+uv run --locked python main.py
+```
+
+API用の参照音声はプロジェクト内の `reference_audio/` に置き、`ref_wav_path` には `sample.wav` のような相対パスを指定できます。APIの生成WAVは `api_outputs/irodori-tts/`、UIの生成WAVは `gradio_outputs/` に保存します。APIのディレクトリは `IRODORI_REFERENCE_AUDIO_DIR`／`IRODORI_API_OUTPUT_DIR` で変更できます。
+
+Windows実機では日本語・空白を含むパスで全58テスト、UI・API起動、caption／参照音声指定による48kHz WAV生成と取得、正常終了を確認済みです。実機確認はRTX 2080／FP32で行い、BF16選択の分岐は単体テストで確認しています。テストはプロジェクトのルートから以下で実行できます。
+
+```powershell
+uv run --locked python -m pytest -q
+```
+
+### Docker
 
 Docker / Docker Compose v2、NVIDIA GPU、nvidia-container-toolkit、外部ネットワーク `dify_default` が必要です。CUDA 12.8と上流のcu128依存構成を使用します。
 
@@ -74,7 +167,7 @@ CERは文字誤り率で、低いほど良い指標です。上記のJSUT値はF
 
 ### 精度・量子化と本環境
 
-RTX 2080（VRAM 8GB）向けの既定はモデルCUDA/FP32、コーデックCPU/FP32です。Composeの `IRODORI_MODEL_PRECISION`、`IRODORI_CODEC_DEVICE`、`IRODORI_CODEC_PRECISION` で変更できます。UIでもデバイス・精度を選択可能です。BF16非対応GPUではBF16を選択肢から除外します。
+Windows起動ではBF16対応GPUでモデルCUDA/BF16を優先し、非対応GPUではCUDA/FP32を使います。Docker Composeの既定はRTX 2080（VRAM 8GB）向けのモデルCUDA/FP32です。コーデックはどちらもCPU/FP32です。環境変数 `IRODORI_MODEL_PRECISION`、`IRODORI_CODEC_DEVICE`、`IRODORI_CODEC_PRECISION` で変更でき、DockerではComposeのenvironmentで設定します。UIでもデバイス・精度を選択可能です。BF16非対応GPUではBF16を選択肢から除外します。
 
 公式の量子化版は、[v4-Small-Quantized](https://huggingface.co/Aratako/Irodori-TTS-v4-Small-Quantized)、[v4.1-Small-Quantized](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-Quantized)、[v4-Large-Quantized](https://huggingface.co/Aratako/Irodori-TTS-v4-Large-Quantized)です。それぞれ元モデルを学習後にtorchaoで量子化した版で、元モデルの条件入力・生成方式を引き継ぎます。MFの少ステップ化と、量子化によるメモリ削減は別の仕組みです。
 
@@ -175,7 +268,7 @@ curl -X POST http://localhost:7860/api/v1/synthesize \
 
 ## 参照音声・長文
 
-`reference_audio/` の実音声はGit追跡外で、コンテナ内の `/app/reference_audio` にread-onlyマウントします。APIの参照パスはこの配下に限定し、相対パスも受け付けます。生成WAVは `api_outputs/irodori-tts/` に保存します。旧VoiceDesignの出力ディレクトリは削除しません。
+`reference_audio/` の実音声はGit追跡外です。Windowsではプロジェクト内のこのディレクトリを参照し、Dockerではコンテナ内の `/app/reference_audio` にread-onlyマウントします。APIの参照パスは設定された参照ディレクトリ配下に限定し、相対パスも受け付けます。生成WAVはホスト側の `api_outputs/irodori-tts/` に保存します。旧VoiceDesignの出力ディレクトリは削除しません。
 
 `auto_split=true` は句点・改行を優先して分割し、順次合成後に無音を挟んで連結します。`num_candidates=1` が必要です。全chunkで同じ参照音声・caption・seedを共有し、seed未指定なら最初のchunkで確定した値を再利用します。
 

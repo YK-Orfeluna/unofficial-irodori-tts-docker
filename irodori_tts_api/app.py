@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import asdict
 from pathlib import Path
@@ -21,11 +22,13 @@ from .runtime_helpers import RUNTIME_LOCK, build_runtime_key, load_runtime
 
 _FILENAME_RE = re.compile(r"^sample_[A-Za-z0-9_-]+\.wav$")
 
-REFERENCE_AUDIO_ROOT = Path("/app/reference_audio")
+REFERENCE_AUDIO_ROOT = Path(os.environ.get(
+    "IRODORI_REFERENCE_AUDIO_DIR", Path(__file__).resolve().parent.parent / "reference_audio"
+))
 
 
 def _validate_reference_path(raw: str) -> str:
-    """Restrict ref_wav_path to files under /app/reference_audio (no traversal)."""
+    """Restrict ref_wav_path to REFERENCE_AUDIO_ROOT (no traversal)."""
     if not raw or not str(raw).strip():
         raise HTTPException(status_code=400, detail="ref_wav_path is empty.")
     candidate = Path(str(raw).strip())

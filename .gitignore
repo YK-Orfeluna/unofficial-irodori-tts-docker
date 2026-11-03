@@ -7,6 +7,10 @@ wandb/
 __pycache__/
 *.pyc
 .gradio/
+.venv/
+tools/
+.pytest_cache/
+*.egg-info/
 
 # reference_audio: ディレクトリ自体は .gitkeep で追跡、中の音声ファイルは追跡しない
 reference_audio/*

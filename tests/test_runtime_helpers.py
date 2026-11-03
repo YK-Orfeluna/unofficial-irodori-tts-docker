@@ -57,6 +57,46 @@ def test_turing_precision_choices(monkeypatch):
     assert helpers.runtime_precision_choices("cuda") == ["fp32"]
 
 
+@pytest.mark.parametrize("capability", [(8, 0), (8, 6), (8, 9), (9, 0), (12, 0)])
+def test_supported_gpus_prefer_bf16(monkeypatch, capability):
+    monkeypatch.setattr(helpers, "list_available_runtime_precisions", lambda device: ["fp32", "bf16"])
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: capability)
+    assert helpers.runtime_precision_choices("cuda") == ["bf16", "fp32"]
+
+
+def test_cpu_precision_choices(monkeypatch):
+    monkeypatch.setattr(helpers, "list_available_runtime_precisions", lambda device: ["fp32"])
+    assert helpers.runtime_precision_choices("cpu") == ["fp32"]
+
+
+def test_explicit_precision_overrides_default(monkeypatch):
+    monkeypatch.setattr(helpers, "runtime_precision_choices", lambda device: ["bf16", "fp32"])
+    monkeypatch.setenv("IRODORI_MODEL_PRECISION", "fp32")
+    assert helpers.resolve_precision_from_env(
+        "IRODORI_MODEL_PRECISION", device="cuda", fallback="bf16",
+    ) == "fp32"
+
+
+@pytest.mark.parametrize("value", ["bf16", "fp16", "invalid"])
+def test_invalid_precision_is_rejected(monkeypatch, value):
+    monkeypatch.setattr(helpers, "runtime_precision_choices", lambda device: ["fp32"])
+    monkeypatch.setenv("IRODORI_MODEL_PRECISION", value)
+    with pytest.raises(SystemExit) as error:
+        helpers.resolve_precision_from_env(
+            "IRODORI_MODEL_PRECISION", device="cuda", fallback="fp32",
+        )
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("precision", ["bf16", "fp32"])
+def test_default_precision_is_logged(monkeypatch, capsys, precision):
+    monkeypatch.delenv("IRODORI_MODEL_PRECISION", raising=False)
+    assert helpers.resolve_precision_from_env(
+        "IRODORI_MODEL_PRECISION", device="cuda", fallback=precision,
+    ) == precision
+    assert ("BF16 preferred" if precision == "bf16" else "BF16 unavailable") in capsys.readouterr().out
+
+
 def test_model_switch_unloads_before_loading_and_reuses_current(monkeypatch):
     events = []
     monkeypatch.setattr(helpers, "_runtime_key", None)
@@ -96,3 +136,36 @@ def test_ui_default_model_and_multiple_reference_inputs():
     assert any("-Quantized/int8-weight-only" in value for value in gradio_app._checkpoint_choices())
     demo = gradio_app.build_ui()
     assert demo is not None
+
+
+@pytest.mark.parametrize("override, expected", [(None, "bf16"), ("fp32", "fp32")])
+def test_ui_initial_precision_and_device_change(monkeypatch, override, expected):
+    import gradio_app
+
+    monkeypatch.setattr(gradio_app, "_default_model_device", lambda: "cuda")
+    monkeypatch.setattr(gradio_app, "_default_codec_device", lambda: "cpu")
+    monkeypatch.setattr(gradio_app, "list_available_runtime_devices", lambda: ["cuda", "cpu"])
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (8, 6))
+    monkeypatch.setattr(helpers, "list_available_runtime_precisions", lambda device: ["fp32", "bf16"] if device == "cuda" else ["fp32"])
+    monkeypatch.delenv("IRODORI_CODEC_PRECISION", raising=False)
+    if override is None:
+        monkeypatch.delenv("IRODORI_MODEL_PRECISION", raising=False)
+    else:
+        monkeypatch.setenv("IRODORI_MODEL_PRECISION", override)
+    demo = gradio_app.build_ui()
+    values = {getattr(block, "label", None): getattr(block, "value", None) for block in demo.blocks.values()}
+    assert values["Model Precision"] == expected
+    assert values["Codec Precision"] == "fp32"
+    assert gradio_app._on_model_device_change("cuda").value == "bf16"
+
+
+def test_local_checkpoint_search_is_relative_to_project(tmp_path, monkeypatch):
+    import gradio_app
+
+    project = tmp_path / "日本語 project"
+    project.mkdir()
+    checkpoint = project / "checkpoint_test.pt"
+    checkpoint.touch()
+    monkeypatch.setattr(gradio_app, "__file__", str(project / "gradio_app.py"))
+    monkeypatch.chdir(tmp_path)
+    assert gradio_app._local_checkpoint_candidates() == [str(checkpoint)]
